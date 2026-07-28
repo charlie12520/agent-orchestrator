@@ -164,6 +164,7 @@ if (typeof window !== "undefined") {
 		},
 		notifications: {
 			show: async () => undefined,
+			setBadgeCount: async () => undefined,
 			onClick: () => () => undefined,
 		},
 		appState: {

@@ -122,6 +122,7 @@ export const aoBridge: AoBridge =
 		},
 		notifications: {
 			show: async () => undefined,
+			setBadgeCount: async () => undefined,
 			onClick: () => () => undefined,
 		},
 		appState: {
