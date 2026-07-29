@@ -22,6 +22,7 @@ import { getAgentActivityView } from "../lib/session-presentation";
 import { isMacPlatform, usesBoardActionsInPanel } from "../lib/platform";
 import { StatusPill } from "./StatusPill";
 import { TopbarButton, TopbarKillError, topbarHeaderClass, topbarProjectLabelClass } from "./TopbarButton";
+import { TopbarOpenEditorButton } from "./TopbarOpenEditorButton";
 
 const isMac = isMacPlatform();
 const boardActionsInPanel = usesBoardActionsInPanel();
@@ -224,6 +225,21 @@ export function ShellTopbar() {
 									Kanban
 								</TopbarButton>
 							</>
+						) : null}
+						{/* Open-in-editor leads the session actions: it is the only
+						    non-destructive one, and it must sit left of Kill. Shown for
+						    orchestrators too — their workspace is the project checkout. */}
+						{session ? (
+							// Keyed per session so a stale launch error does not carry over
+							// when switching sessions. The prefix keeps it distinct from the
+							// kill button's key: identical sibling keys make React duplicate
+							// the nodes.
+							<TopbarOpenEditorButton
+								key={`open-editor-${session.id}`}
+								sessionId={session.id}
+								projectId={session.workspaceId}
+								style={noDragStyle}
+							/>
 						) : null}
 						{/* Kill control sits beside the orchestrator link for active workers —
 						    moved here from the inspector's Summary "Danger zone". */}
