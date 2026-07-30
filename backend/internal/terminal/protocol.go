@@ -1,5 +1,7 @@
 package terminal
 
+import "github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
+
 // The wire protocol is a single multiplexed JSON stream tagged by channel
 // ("ch"), mirroring the legacy Node mux server so the existing xterm client can
 // connect unchanged. One socket carries every logical stream:
@@ -12,6 +14,10 @@ package terminal
 // Terminal payloads are base64 in the Data field: PTY output is arbitrary bytes
 // and need not be valid UTF-8, which a raw JSON string could not carry.
 const (
+	// ProtocolVersion identifies the JSON terminal-mux contract. It is also
+	// advertised by the daemon attestation and WebSocket upgrade response.
+	ProtocolVersion = daemonmeta.TerminalMuxProtocolVersion
+
 	chTerminal  = "terminal"
 	chSubscribe = "subscribe"
 	chSessions  = "sessions"

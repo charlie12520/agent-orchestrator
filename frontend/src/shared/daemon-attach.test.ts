@@ -10,15 +10,47 @@ import {
 	resolveDaemonFromPort,
 	resolveDaemonFromRunFile,
 } from "./daemon-attach";
+import { EXPECTED_DAEMON_ATTESTATION, type DaemonAttestation } from "./daemon-attestation";
+
+const VALID_ATTESTATION: DaemonAttestation = {
+	contractVersion: EXPECTED_DAEMON_ATTESTATION.contractVersion,
+	distribution: EXPECTED_DAEMON_ATTESTATION.distribution,
+	upstream: {
+		repository: EXPECTED_DAEMON_ATTESTATION.upstreamRepository,
+		commit: EXPECTED_DAEMON_ATTESTATION.upstreamCommit,
+	},
+	build: {
+		version: "0.10.3-superorch.1",
+		commit: "0123456789abcdef0123456789abcdef01234567",
+		mode: "release",
+	},
+	protocols: { ...EXPECTED_DAEMON_ATTESTATION.protocols },
+	capabilities: { ...EXPECTED_DAEMON_ATTESTATION.declaredCapabilities },
+};
 
 // A run-file the daemon would write: pid+port+timestamp, as JSON.
-function runFile(pid: number, port: number): string {
-	return JSON.stringify({ pid, port, startedAt: "2026-06-10T16:15:04Z" });
+function runFile(pid: number, port: number, attestation: DaemonAttestation = VALID_ATTESTATION): string {
+	return JSON.stringify({
+		pid,
+		port,
+		startedAt: "2026-06-10T16:15:04Z",
+		attestation,
+	});
 }
 
 // A probe map keyed by `${port}:${endpoint}` → fake an HTTP probe deterministically.
 function fakeProbe(responses: Record<string, DaemonProbe | null>): DaemonProber {
-	return (port, endpoint) => Promise.resolve(responses[`${port}:${endpoint}`] ?? null);
+	return (port, endpoint) => {
+		const response = responses[`${port}:${endpoint}`] ?? null;
+		return Promise.resolve(
+			response
+				? {
+						...response,
+						attestation: response.attestation ?? VALID_ATTESTATION,
+					}
+				: null,
+		);
+	};
 }
 
 const ALIVE = () => true;
@@ -48,8 +80,18 @@ describe("expectedDaemonPort", () => {
 });
 
 describe("parseDaemonProbe", () => {
-	const healthBody = { status: "ok", service: DAEMON_SERVICE_NAME, pid: 4242 };
-	const readyBody = { status: "ready", service: DAEMON_SERVICE_NAME, pid: 4242 };
+	const healthBody = {
+		status: "ok",
+		service: DAEMON_SERVICE_NAME,
+		pid: 4242,
+		attestation: VALID_ATTESTATION,
+	};
+	const readyBody = {
+		status: "ready",
+		service: DAEMON_SERVICE_NAME,
+		pid: 4242,
+		attestation: VALID_ATTESTATION,
+	};
 
 	it("accepts a well-formed healthz body", () => {
 		expect(parseDaemonProbe("healthz", healthBody)).toEqual({
@@ -59,6 +101,7 @@ describe("parseDaemonProbe", () => {
 			executablePath: undefined,
 			workingDirectory: undefined,
 			startupWorkingDirectory: undefined,
+			attestation: VALID_ATTESTATION,
 		});
 	});
 
@@ -77,6 +120,7 @@ describe("parseDaemonProbe", () => {
 			executablePath: "/bin/ao",
 			workingDirectory: "/work/data",
 			startupWorkingDirectory: "/work",
+			attestation: VALID_ATTESTATION,
 		});
 	});
 
@@ -131,6 +175,23 @@ describe("resolveDaemonFromRunFile", () => {
 			identityError: NO_IDENTITY_ERROR,
 		});
 		expect(result).toBeNull();
+	});
+
+	it("rejects a live legacy run-file before any daemon API use", async () => {
+		const probe = vi.fn<DaemonProber>();
+		const result = await resolveDaemonFromRunFile({
+			runFileContents: JSON.stringify({ pid: 4242, port: 3001 }),
+			isProcessAlive: ALIVE,
+			probe,
+			identityError: NO_IDENTITY_ERROR,
+		});
+		expect(result).toMatchObject({
+			state: "error",
+			code: "compatibility_mismatch",
+			pid: 4242,
+			port: 3001,
+		});
+		expect(probe).not.toHaveBeenCalled();
 	});
 
 	it("returns null when the recorded pid is not alive (#367 divergence)", async () => {
@@ -230,6 +291,30 @@ describe("resolveDaemonFromRunFile", () => {
 			workingDirectory: "/work/backend",
 		});
 	});
+
+	it("rejects when the run-file and live daemon name different fork builds", async () => {
+		const other = {
+			...VALID_ATTESTATION,
+			build: { ...VALID_ATTESTATION.build, commit: "f".repeat(40) },
+		};
+		const result = await resolveDaemonFromRunFile({
+			runFileContents: runFile(4242, 3037),
+			isProcessAlive: ALIVE,
+			probe: fakeProbe({
+				"3037:healthz": {
+					status: "ok",
+					service: DAEMON_SERVICE_NAME,
+					pid: 4242,
+					attestation: other,
+				},
+			}),
+			identityError: NO_IDENTITY_ERROR,
+		});
+		expect(result).toMatchObject({
+			state: "error",
+			code: "compatibility_mismatch",
+		});
+	});
 });
 
 describe("resolveDaemonFromPort", () => {
@@ -240,6 +325,24 @@ describe("resolveDaemonFromPort", () => {
 			identityError: NO_IDENTITY_ERROR,
 		});
 		expect(result).toBeNull();
+	});
+
+	it("surfaces an attestation error instead of spawning over a legacy AO daemon", async () => {
+		const probe = vi
+			.fn<DaemonProber>()
+			.mockImplementation((_, endpoint) => Promise.resolve(endpoint === "healthz" ? { status: "ok", service: DAEMON_SERVICE_NAME, pid: 777 } : null));
+		const result = await resolveDaemonFromPort({
+			expectedPort: 3001,
+			probe,
+			identityError: NO_IDENTITY_ERROR,
+		});
+		expect(result).toMatchObject({
+			state: "error",
+			code: "compatibility_mismatch",
+			pid: 777,
+			port: 3001,
+		});
+		expect(probe).toHaveBeenCalledTimes(1);
 	});
 
 	it("attaches (ready) when a daemon answers /healthz and /readyz on the expected port", async () => {
@@ -339,6 +442,7 @@ describe("end-to-end against a real daemon server", () => {
 				pid: opts.pid,
 				executablePath: opts.executablePath,
 				workingDirectory: opts.workingDirectory,
+				attestation: VALID_ATTESTATION,
 			};
 			if (url === "/healthz") {
 				res.writeHead(200, { "content-type": "application/json" });

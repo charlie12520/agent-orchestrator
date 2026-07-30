@@ -94,6 +94,9 @@ func TestEventsStreamSubscribesBeforeReplayAndDrainsBufferedLive(t *testing.T) {
 	if got := resp.Header.Get("X-Accel-Buffering"); got != "no" {
 		t.Fatalf("X-Accel-Buffering = %q, want no", got)
 	}
+	if got := resp.Header.Get("X-AO-SSE-Envelope-Version"); got != "1" {
+		t.Fatalf("X-AO-SSE-Envelope-Version = %q, want 1", got)
+	}
 
 	ids := readSSEIDs(t, resp.Body, 2)
 	if got, want := strings.Join(ids, ","), "1,2"; got != want {

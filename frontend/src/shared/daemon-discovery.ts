@@ -1,3 +1,5 @@
+import { parseDaemonAttestation, type DaemonAttestation } from "./daemon-attestation";
+
 // Helpers for discovering the daemon's actually-bound port. The configured
 // AO_PORT is only a request — the daemon may bind a different port (port 0,
 // operator overrides), so the supervisor trusts what the daemon reports:
@@ -76,6 +78,7 @@ export type RunFileInfo = {
 	owner?: string;
 	browserRuntimeToken?: string;
 	browserRuntimeAddress?: string;
+	attestation?: DaemonAttestation;
 };
 
 /** Parse running.json contents. Returns null for malformed JSON or an invalid port. */
@@ -87,16 +90,18 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		return null;
 	}
 	if (typeof raw !== "object" || raw === null) return null;
-	const { pid, port, startedAt, owner, browserRuntimeToken, browserRuntimeAddress } = raw as {
+	const { pid, port, startedAt, owner, browserRuntimeToken, browserRuntimeAddress, attestation } = raw as {
 		pid?: unknown;
 		port?: unknown;
 		startedAt?: unknown;
 		owner?: unknown;
 		browserRuntimeToken?: unknown;
 		browserRuntimeAddress?: unknown;
+		attestation?: unknown;
 	};
 	if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) return null;
 	const startedAtMs = typeof startedAt === "string" ? Date.parse(startedAt) : NaN;
+	const parsedAttestation = parseDaemonAttestation(attestation);
 	return {
 		pid: typeof pid === "number" && Number.isInteger(pid) ? pid : 0,
 		port,
@@ -104,6 +109,7 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		owner: typeof owner === "string" ? owner : undefined,
 		browserRuntimeToken: typeof browserRuntimeToken === "string" ? browserRuntimeToken : undefined,
 		browserRuntimeAddress: typeof browserRuntimeAddress === "string" ? browserRuntimeAddress : undefined,
+		...(parsedAttestation ? { attestation: parsedAttestation } : {}),
 	};
 }
 

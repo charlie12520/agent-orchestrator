@@ -19,6 +19,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
@@ -43,6 +44,11 @@ import (
 // Run starts the daemon and blocks until it exits. SIGINT/SIGTERM drive
 // graceful shutdown through the HTTP server and background workers.
 func Run() error {
+	// A release with ambiguous identity must stop before config loading, storage
+	// migration, or any other durable mutation.
+	if err := daemonmeta.ValidateBuildIdentity(); err != nil {
+		return fmt.Errorf("validate build identity: %w", err)
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err

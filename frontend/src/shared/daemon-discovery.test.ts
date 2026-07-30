@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { EXPECTED_DAEMON_ATTESTATION, type DaemonAttestation } from "./daemon-attestation";
 import { createListenPortScanner, defaultRunFilePath, parseDaemonListenPort, parseRunFile } from "./daemon-discovery";
 
 // Real shape emitted by slog's TextHandler in backend/internal/httpd/server.go.
@@ -62,6 +63,17 @@ describe("createListenPortScanner", () => {
 
 describe("parseRunFile", () => {
 	const valid = JSON.stringify({ pid: 4242, port: 3037, startedAt: "2026-06-10T16:15:04Z" });
+	const attestation: DaemonAttestation = {
+		contractVersion: EXPECTED_DAEMON_ATTESTATION.contractVersion,
+		distribution: EXPECTED_DAEMON_ATTESTATION.distribution,
+		upstream: {
+			repository: EXPECTED_DAEMON_ATTESTATION.upstreamRepository,
+			commit: EXPECTED_DAEMON_ATTESTATION.upstreamCommit,
+		},
+		build: { version: "0.10.3", commit: "a".repeat(40), mode: "release" },
+		protocols: { ...EXPECTED_DAEMON_ATTESTATION.protocols },
+		capabilities: { ...EXPECTED_DAEMON_ATTESTATION.declaredCapabilities },
+	};
 
 	it("parses a valid handshake", () => {
 		expect(parseRunFile(valid)).toEqual({
@@ -87,6 +99,26 @@ describe("parseRunFile", () => {
 				browserRuntimeAddress: String.raw`\\.\pipe\ao-browser-dev`,
 			}),
 		);
+	});
+
+	it("parses the machine-readable compatibility attestation", () => {
+		expect(parseRunFile(JSON.stringify({ pid: 4242, port: 3037, attestation }))).toEqual(expect.objectContaining({ attestation }));
+	});
+
+	it("does not trust a malformed compatibility attestation", () => {
+		expect(
+			parseRunFile(
+				JSON.stringify({
+					pid: 4242,
+					port: 3037,
+					attestation: { contractVersion: 1 },
+				}),
+			),
+		).toEqual({
+			pid: 4242,
+			port: 3037,
+			startedAtMs: 0,
+		});
 	});
 
 	it("returns null for malformed JSON", () => {

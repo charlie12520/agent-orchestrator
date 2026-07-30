@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
 )
@@ -89,6 +90,7 @@ func (s *Server) Handler() http.Handler { return s.http.Handler }
 // running.json before serving and removes it on the way out. Run blocks until
 // shutdown is complete.
 func (s *Server) Run(ctx context.Context) error {
+	attestation := daemonmeta.Current()
 	info := runfile.Info{
 		PID:                   os.Getpid(),
 		Port:                  s.boundPort(),
@@ -96,6 +98,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Owner:                 os.Getenv("AO_OWNER"),
 		BrowserRuntimeToken:   os.Getenv("AO_BROWSER_RUNTIME_TOKEN"),
 		BrowserRuntimeAddress: os.Getenv("AO_BROWSER_RUNTIME_ADDRESS"),
+		Attestation:           &attestation,
 	}
 	if err := runfile.Write(s.cfg.RunFilePath, info); err != nil {
 		_ = s.listen.Close()

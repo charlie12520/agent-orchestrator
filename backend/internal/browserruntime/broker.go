@@ -19,12 +19,13 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 const (
 	// ProtocolVersion identifies the daemon-to-Electron browser bridge contract.
-	ProtocolVersion = 2
+	ProtocolVersion = daemonmeta.BrowserBridgeProtocolVersion
 	// RuntimeTokenEnv is deliberately removed from worker and preview-process
 	// environments. Only the daemon and desktop supervisor need it.
 	RuntimeTokenEnv = "AO_BROWSER_RUNTIME_TOKEN" //nolint:gosec // Environment variable name, not a credential.

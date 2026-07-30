@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 )
@@ -39,6 +40,9 @@ func newPRTestServer(t *testing.T, svc prsvc.ActionManager) *httptest.Server {
 // ---- Nil service → 503 SCM_NOT_CONFIGURED ----
 
 func TestPRsRoutes_NilService_MergeReturns501(t *testing.T) {
+	if daemonmeta.Current().Capabilities["prMerge"] {
+		t.Fatal("prMerge attested true while the production controller is a 501 placeholder")
+	}
 	srv := newPRTestServer(t, nil)
 	body, status, headers := doRequest(t, srv, "POST", "/api/v1/prs/1/merge", "")
 	assertJSON(t, headers)

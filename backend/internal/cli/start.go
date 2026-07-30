@@ -21,7 +21,7 @@ import (
 //
 //	go build -ldflags "-X github.com/aoagents/agent-orchestrator/backend/internal/cli.releaseRepo=harshitsinghbhandari/agent-orchestrator" ./cmd/ao
 //
-// Mirrors how version.go's Version var is stamped by release tooling.
+// Mirrors how daemonmeta's build identity is stamped by release tooling.
 var releaseRepo = "AgentWrapper/agent-orchestrator"
 
 // appBundleName is the macOS bundle directory name produced by electron-forge

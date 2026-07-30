@@ -1,0 +1,136 @@
+# SuperOrch AO build attestation
+
+The SuperOrch AO fork publishes one compatibility contract from every daemon
+surface used during discovery. Consumers must validate this contract before
+calling a mutating REST endpoint, opening a terminal or browser channel, or
+starting a replacement daemon.
+
+The official upstream baseline is pinned to commit
+`9f26112a0194d8ed86722ebb97115cbc678e4f38` from
+`https://github.com/Untrivial-ai/agent-orchestrator`. A fork build additionally
+identifies its own exact version, full lowercase commit SHA, and build mode.
+
+## Contract
+
+```json
+{
+	"contractVersion": 1,
+	"distribution": "superorch-ao",
+	"upstream": {
+		"repository": "https://github.com/Untrivial-ai/agent-orchestrator",
+		"commit": "9f26112a0194d8ed86722ebb97115cbc678e4f38"
+	},
+	"build": {
+		"version": "0.10.3",
+		"commit": "<full lowercase fork commit>",
+		"mode": "release"
+	},
+	"protocols": {
+		"restApi": 1,
+		"sseEnvelope": 1,
+		"terminalMux": 1,
+		"browserBridge": 2,
+		"sessionControl": 1,
+		"prControl": 1,
+		"orchestratorControl": 1,
+		"durableEventReplay": 0,
+		"durableMutationJournal": 0,
+		"generationFencing": 0,
+		"authenticatedIpc": 0,
+		"databaseSchema": 38
+	},
+	"capabilities": {
+		"authenticatedGuardian": false,
+		"authenticatedIpc": false,
+		"authenticatedWatchdog": false,
+		"browserBridge": true,
+		"browserControl": true,
+		"buildAttestation": true,
+		"desktopAttachCompatibility": true,
+		"durableEventReplay": false,
+		"durableMutationJournal": false,
+		"generationFencing": false,
+		"globalSupervisor": false,
+		"healthAttestation": true,
+		"omp": false,
+		"orchestrators": true,
+		"prClaim": true,
+		"prMerge": false,
+		"prPreview": true,
+		"restApi": true,
+		"reviews": true,
+		"restrictedWorkerIsolation": false,
+		"runfileAttestation": true,
+		"sessionCleanup": true,
+		"sessionInterrupt": false,
+		"sessionLifecycle": true,
+		"sessionMergePolicy": true,
+		"sessionResume": true,
+		"sessionRollback": true,
+		"sessionSend": true,
+		"sqlite": true,
+		"sseEvents": true,
+		"terminalControl": true,
+		"terminalMux": true
+	}
+}
+```
+
+Each protocol or schema version is independent. A change to one boundary must
+increment that boundary's value; changing only the product version is not a
+compatibility signal. New optional capabilities may be added without changing
+the attestation contract version. A consumer must reject a missing or false
+required capability.
+
+The functional flags describe controls that execute in the pinned fork, not
+route declarations or an aspirational API. `sessionInterrupt` is false because
+AO exposes termination, resume, rollback, send, and raw terminal input but no
+dedicated session interrupt operation. `prMerge` is false because the pinned
+controller is a `501 Not Implemented` placeholder; the presence of its route is
+not a capability. `prPreview` denotes AO's managed session preview controls and
+`prClaim` denotes its native PR ownership endpoint.
+
+The hardened SuperOrch guarantees are also explicitly false: authenticated
+IPC, authenticated guardian/watchdog control, durable mutation journaling,
+generation fencing, a global supervisor, OMP execution, restricted worker
+isolation, and durable replay with instance/epoch/high-water semantics. Their
+protocol versions are `0` where applicable. AO's SQLite change log and SSE
+cursor can replay rows, but this attestation does not upgrade that native
+behavior into the stronger cross-restart SuperOrch replay contract. Consumers
+that require any false flag must fail closed instead of inferring it from a
+neighboring route, table, or transport.
+
+## Surfaces
+
+- `ao version --json` prints the contract without starting the daemon.
+- `running.json` includes it under `attestation`.
+- `/healthz` and `/readyz` include it under `attestation`.
+- SSE responses advertise `X-AO-SSE-Envelope-Version`.
+- The `/mux` WebSocket upgrade advertises `X-AO-Terminal-Mux-Version`.
+- `frontend/daemon/ao.attestation.json` is emitted beside a bundled daemon and
+  is validated against the binary immediately after compilation.
+
+The desktop attach path validates the runfile before probing the daemon, then
+validates both probes and requires all three surfaces to identify the same fork
+build. A legacy upstream daemon, an incompatible fork, or a stale runfile is an
+explicit `compatibility_mismatch`; it is never treated as permission to spawn
+over or replace that process.
+
+Daemon startup validates only attestation/build self-consistency. It does not
+require future integration capabilities to be true. The consuming adapter
+chooses a required-capability set for its operation (for example, observe-only
+versus mutating control) and rejects any missing or false member before that
+operation.
+
+## Build rules
+
+Release builds must use an explicit linker-safe version, a full lowercase fork
+commit, and mode `release`. `dev`, `development`, `unknown`, a short SHA, or a
+missing stamp makes daemon startup fail before config loading or database
+migration. Direct `go build` remains available for local work and is
+unambiguously attested as version `dev`, commit `unknown`, mode `development`.
+
+The Electron daemon build uses `-trimpath -buildvcs=false` and deterministic
+linker values, executes `ao version --json`, validates the result, and only then
+retains the binary. The npm platform-binary release script applies the same
+stamps to every cross-compiled target.

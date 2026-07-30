@@ -18,6 +18,12 @@
 // path identity check.
 
 import type { DaemonStatus } from "./daemon-status";
+import {
+	daemonCompatibilityError,
+	parseDaemonAttestation,
+	sameDaemonBuild,
+	type DaemonAttestation,
+} from "./daemon-attestation";
 import { parseRunFile } from "./daemon-discovery";
 
 // The daemon's default bind port (backend/internal/config). AO_PORT overrides it.
@@ -32,6 +38,7 @@ export type DaemonProbe = {
 	executablePath?: string;
 	workingDirectory?: string;
 	startupWorkingDirectory?: string;
+	attestation?: DaemonAttestation;
 };
 
 /** A /healthz|/readyz probe of a loopback port; resolves null when nothing valid answers. */
@@ -58,6 +65,7 @@ export function parseDaemonProbe(endpoint: "healthz" | "readyz", body: unknown):
 	if (candidate.status !== (endpoint === "healthz" ? "ok" : "ready")) return null;
 	if (candidate.service !== DAEMON_SERVICE_NAME) return null;
 	if (typeof candidate.pid !== "number" || !Number.isInteger(candidate.pid)) return null;
+	const attestation = parseDaemonAttestation((body as { attestation?: unknown }).attestation);
 	return {
 		status: candidate.status,
 		service: candidate.service,
@@ -66,6 +74,7 @@ export function parseDaemonProbe(endpoint: "healthz" | "readyz", body: unknown):
 		workingDirectory: typeof candidate.workingDirectory === "string" ? candidate.workingDirectory : undefined,
 		startupWorkingDirectory:
 			typeof candidate.startupWorkingDirectory === "string" ? candidate.startupWorkingDirectory : undefined,
+		...(attestation ? { attestation } : {}),
 	};
 }
 
@@ -91,12 +100,22 @@ export async function resolveDaemonFromRunFile(deps: RunFileResolveDeps): Promis
 	if (runFileContents === null) return null;
 	const info = parseRunFile(runFileContents);
 	if (!info || !isProcessAlive(info.pid)) return null;
+	const runFileCompatibility = daemonCompatibilityError(info.attestation);
+	if (runFileCompatibility) return compatibilityStatus(info.port, info.pid, undefined, runFileCompatibility);
 
 	const health = await probe(info.port, "healthz");
 	// The recorded PID must match the live daemon; otherwise the run-file points
 	// at the wrong process — return null so the caller falls through to the port
 	// probe rather than trusting a stale handshake.
 	if (!health || health.pid !== info.pid) return null;
+	if (!sameDaemonBuild(info.attestation, health.attestation)) {
+		return compatibilityStatus(
+			info.port,
+			info.pid,
+			health,
+			"The AO runfile and live daemon report different fork builds.",
+		);
+	}
 	return readinessStatus(info.port, info.pid, health, probe, identityError);
 }
 
@@ -141,6 +160,8 @@ async function readinessStatus(
 	probe: DaemonProber,
 	identityError: (probe: DaemonProbe) => string | null,
 ): Promise<DaemonStatus> {
+	const healthCompatibility = daemonCompatibilityError(health.attestation);
+	if (healthCompatibility) return compatibilityStatus(port, pid, health, healthCompatibility);
 	const ready = await probe(port, "readyz");
 	if (!ready || ready.pid !== pid) {
 		return {
@@ -152,6 +173,16 @@ async function readinessStatus(
 			message: "An AO daemon is already running, but it is not ready yet.",
 			code: "not_ready",
 		};
+	}
+	const readyCompatibility = daemonCompatibilityError(ready.attestation);
+	if (readyCompatibility) return compatibilityStatus(port, pid, ready, readyCompatibility);
+	if (!sameDaemonBuild(health.attestation, ready.attestation)) {
+		return compatibilityStatus(
+			port,
+			pid,
+			ready,
+			"The AO health and readiness probes report different fork builds.",
+		);
 	}
 
 	const message = identityError(ready);
@@ -173,5 +204,17 @@ async function readinessStatus(
 		pid,
 		executablePath: ready.executablePath,
 		workingDirectory: ready.workingDirectory,
+	};
+}
+
+function compatibilityStatus(port: number, pid: number, probe: DaemonProbe | undefined, message: string): DaemonStatus {
+	return {
+		state: "error",
+		port,
+		pid,
+		executablePath: probe?.executablePath,
+		workingDirectory: probe?.workingDirectory,
+		message,
+		code: "compatibility_mismatch",
 	};
 }

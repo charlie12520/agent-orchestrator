@@ -5,36 +5,34 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 )
 
-// Build metadata. Release tooling can override these with -ldflags.
-var (
-	Version = "dev"
-	Commit  = ""
-	Date    = ""
-)
-
-// VersionString renders the build metadata as "<version> commit <c> built <d>",
-// omitting the commit/date parts when they are unset.
+// VersionString renders the shared build identity for the human CLI surface.
 func VersionString() string {
-	parts := []string{Version}
-	if Commit != "" {
-		parts = append(parts, "commit "+Commit)
-	}
-	if Date != "" {
-		parts = append(parts, "built "+Date)
+	build := daemonmeta.Current().Build
+	parts := []string{build.Version}
+	if build.Commit != "" && build.Commit != "unknown" {
+		parts = append(parts, "commit "+build.Commit)
 	}
 	return strings.Join(parts, " ")
 }
 
 func newVersionCommand() *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print version information",
 		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if jsonOutput {
+				return writeJSON(cmd.OutOrStdout(), daemonmeta.Current())
+			}
 			_, err := fmt.Fprintln(cmd.OutOrStdout(), VersionString())
 			return err
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "print machine-readable build and compatibility attestation")
+	return cmd
 }

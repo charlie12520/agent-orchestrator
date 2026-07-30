@@ -2,6 +2,7 @@ package httpd
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -33,6 +34,7 @@ func mountTerminalMux(r chi.Router, mgr *terminal.Manager, log *slog.Logger) {
 // all stream logic lives in internal/terminal.
 func terminalMuxHandler(mgr *terminal.Manager, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-AO-Terminal-Mux-Version", fmt.Sprintf("%d", terminal.ProtocolVersion))
 		// InsecureSkipVerify disables coder/websocket's same-origin check: the
 		// daemon binds loopback only and the desktop renderer's origin differs
 		// from the loopback host, mirroring the legacy Node mux server.

@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/pressly/goose/v3"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 )
 
 // TestMigrationVersionsAreUnique scans the embedded migration filenames and
@@ -35,5 +37,28 @@ func TestMigrationVersionsAreUnique(t *testing.T) {
 			continue
 		}
 		seen[version] = name
+	}
+}
+
+func TestAttestedDatabaseSchemaMatchesLatestMigration(t *testing.T) {
+	entries, err := migrationsFS.ReadDir("migrations")
+	if err != nil {
+		t.Fatalf("read embedded migrations: %v", err)
+	}
+	var latest int64
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		version, err := goose.NumericComponent(entry.Name())
+		if err != nil {
+			continue
+		}
+		if version > latest {
+			latest = version
+		}
+	}
+	if latest != int64(daemonmeta.DatabaseSchemaVersion) {
+		t.Fatalf("attested database schema = %d, latest embedded migration = %d", daemonmeta.DatabaseSchemaVersion, latest)
 	}
 }
