@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { DaemonLaunchSpec } from "../shared/daemon-launch";
+import { isDirectAoExecutable, type DaemonLaunchSpec } from "../shared/daemon-launch";
 import {
 	daemonCompatibilityError,
 	EXPECTED_DAEMON_ATTESTATION,
@@ -24,17 +24,15 @@ export function daemonPreflightSpec(launch: DaemonLaunchSpec): DaemonPreflightSp
 			shell: false,
 		};
 	}
-	const daemonIndex = launch.configuredDaemonArgIndex;
 	if (
-		daemonIndex === undefined ||
-		daemonIndex < 0 ||
-		launch.args[daemonIndex] !== "daemon" ||
-		launch.args.filter((value) => value === "daemon").length !== 1
+		!isDirectAoExecutable(launch.command, process.platform) ||
+		launch.args[0] !== "daemon" ||
+		launch.args.slice(1).some((value) => value === "daemon")
 	)
 		return null;
 	return {
 		command: launch.command,
-		args: [...launch.args.slice(0, daemonIndex), "version", "--json"],
+		args: ["version", "--json"],
 		cwd: launch.cwd,
 		shell: false,
 	};
@@ -48,7 +46,7 @@ export async function preflightDaemonLaunch(
 ): Promise<string | null> {
 	const spec = daemonPreflightSpec(launch);
 	if (!spec) {
-		return "The configured AO daemon argv must contain exactly one literal daemon subcommand so compatibility can be verified before spawn.";
+		return "The configured AO daemon arguments must begin with one literal daemon subcommand so the direct executable can be verified before spawn.";
 	}
 	const result = await runner(spec);
 	if (result.error) return `Could not inspect the AO daemon candidate: ${result.error}`;

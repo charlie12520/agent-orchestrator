@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseConfiguredDaemonCommand, resolveDaemonLaunch } from "./daemon-launch";
 
 function configured(env: Record<string, string | undefined>, platform: NodeJS.Platform = "darwin") {
@@ -6,7 +6,7 @@ function configured(env: Record<string, string | undefined>, platform: NodeJS.Pl
 }
 
 describe("resolveDaemonLaunch", () => {
-	it("prefers an explicit JSON argv contract and never enables a shell", () => {
+	it("accepts only a direct AO executable followed immediately by daemon", () => {
 		const argv = ["C:\\Program Files\\Agent Orchestrator\\ao.exe", "daemon", "--port", "4317"];
 		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(argv) }, "win32")).toEqual({
 			command: argv[0],
@@ -14,11 +14,10 @@ describe("resolveDaemonLaunch", () => {
 			cwd: "/app",
 			shell: false,
 			source: "configured",
-			configuredDaemonArgIndex: 0,
 		});
 	});
 
-	it("preserves literal JSON arguments that would be shell syntax", () => {
+	it("preserves literal JSON daemon arguments without shell expansion", () => {
 		const argv = [
 			"C:\\Program Files (x86)\\AO $literal\\ao.exe",
 			"daemon",
@@ -34,51 +33,30 @@ describe("resolveDaemonLaunch", () => {
 		});
 	});
 
-	it("strictly parses the legacy quoted POSIX compatibility form into argv", () => {
+	it("strictly parses the legacy quoted POSIX compatibility form into direct argv", () => {
 		expect(configured({ AO_DAEMON_COMMAND: '"/opt/AO Builds/ao" daemon --port "4317"' })).toEqual({
 			command: "/opt/AO Builds/ao",
 			args: ["daemon", "--port", "4317"],
 			cwd: "/app",
 			shell: false,
 			source: "configured",
-			configuredDaemonArgIndex: 0,
 		});
 	});
 
-	it("strictly parses a quoted Windows executable without treating single quotes as quoting", () => {
+	it("strictly parses a direct quoted Windows executable without treating single quotes as quoting", () => {
 		const command = '"C:\\Program Files\\Agent Orchestrator\\ao.exe" daemon --port 4317';
 		expect(configured({ AO_DAEMON_COMMAND: command }, "win32")).toMatchObject({
 			command: "C:\\Program Files\\Agent Orchestrator\\ao.exe",
 			args: ["daemon", "--port", "4317"],
 			shell: false,
-			configuredDaemonArgIndex: 0,
 		});
 		expect(configured({ AO_DAEMON_COMMAND: "ao 'daemon'" }, "win32")).toBeNull();
 	});
 
-	it("preserves an exact executable prefix and daemon arguments", () => {
-		expect(configured({ AO_DAEMON_COMMAND: 'go run "./cmd/ao" daemon --port 4317 --label "two words"' })).toEqual({
-			command: "go",
-			args: ["run", "./cmd/ao", "daemon", "--port", "4317", "--label", "two words"],
-			cwd: "/app",
-			shell: false,
-			source: "configured",
-			configuredDaemonArgIndex: 2,
-		});
-	});
-
-	it("preserves POSIX backslashes inside double quotes unless POSIX makes them special", () => {
-		expect(parseConfiguredDaemonCommand('wrapper "d\\aemon" /opt/ao daemon', "darwin")).toEqual([
-			"wrapper",
-			"d\\aemon",
-			"/opt/ao",
-			"daemon",
-		]);
-		expect(configured({ AO_DAEMON_COMMAND: 'wrapper "d\\aemon" /opt/ao daemon' })).toMatchObject({
-			command: "wrapper",
-			args: ["d\\aemon", "/opt/ao", "daemon"],
-			configuredDaemonArgIndex: 2,
-		});
+	it("preserves POSIX backslashes while rejecting the resulting wrapper prefix", () => {
+		const command = 'wrapper "d\\aemon" /opt/ao daemon';
+		expect(parseConfiguredDaemonCommand(command, "darwin")).toEqual(["wrapper", "d\\aemon", "/opt/ao", "daemon"]);
+		expect(configured({ AO_DAEMON_COMMAND: command })).toBeNull();
 	});
 
 	it.each([
@@ -101,7 +79,9 @@ describe("resolveDaemonLaunch", () => {
 		["cmd", ["cmd.exe", "/c", "ao", "daemon"]],
 		["sh", ["/bin/sh", "-c", "ao", "daemon"]],
 		["PowerShell", ["C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "-Command", "ao", "daemon"]],
-	] as const)("rejects an explicit %s interpreter wrapper", (_name, argv) => {
+		["GNU env -S", ["/usr/bin/env", "-S", "branch-on-subcommand", "ao", "daemon"]],
+		["env.exe", ["C:\\Program Files\\Git\\usr\\bin\\env.exe", "daemon", "--port", "4317"]],
+	] as const)("rejects an explicit %s multiplexer", (_name, argv) => {
 		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(argv) }, "win32")).toBeNull();
 	});
 
@@ -109,23 +89,64 @@ describe("resolveDaemonLaunch", () => {
 		["cmd", "cmd.exe /c ao daemon", "win32"],
 		["sh", "sh -c ao daemon", "darwin"],
 		["PowerShell", "powershell.exe -Command ao daemon", "win32"],
-	] as const)("rejects a legacy %s interpreter wrapper", (_name, command, platform) => {
+		["go run", 'go run "./cmd/ao" daemon --port 4317', "darwin"],
+		["arbitrary wrapper", 'renamed-wrapper "/opt/ao" daemon --port 4317', "darwin"],
+	] as const)("rejects a legacy %s prefix", (_name, command, platform) => {
 		expect(configured({ AO_DAEMON_COMMAND: command }, platform)).toBeNull();
 	});
 
-	it("requires one unique literal daemon element after the executable", () => {
+	it("rejects arbitrary renamed wrappers and pre-subcommand arguments regardless of behavior", () => {
+		const execute = vi.fn();
+		for (const argv of [
+			["renamed-wrapper", "/opt/ao", "daemon", "--port", "4317"],
+			["C:\\tools\\renamed-wrapper.exe", "C:\\AO\\ao.exe", "daemon"],
+			["/opt/ao", "--config", "/tmp/config", "daemon"],
+		]) {
+			const launch = configured({ AO_DAEMON_ARGV: JSON.stringify(argv) }, "win32");
+			if (launch) execute(launch);
+			expect(launch).toBeNull();
+		}
+		expect(execute).not.toHaveBeenCalled();
+	});
+
+	it("rejects the live GNU env -S branch shape before any execution", () => {
+		const execute = vi.fn();
+		const branchingBypass = [
+			"/usr/bin/env",
+			"-S",
+			`sh -c 'if [ "$1" = version ]; then exec /opt/ao "$@"; else touch /tmp/branch-ran; fi' --`,
+			"ao",
+			"daemon",
+			"--port",
+			"4317",
+		];
+		const launch = configured({ AO_DAEMON_ARGV: JSON.stringify(branchingBypass) });
+		if (launch) execute(launch);
+		expect(launch).toBeNull();
+		expect(execute).not.toHaveBeenCalled();
+	});
+
+	it("requires one unique literal daemon element immediately after the executable", () => {
 		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(["ao", "start"]) })).toBeNull();
 		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(["daemon"]) })).toBeNull();
+		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(["ao", "--config", "x", "daemon"]) })).toBeNull();
 		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(["ao", "daemon", "daemon"]) })).toBeNull();
+	});
+
+	it("requires the direct executable name to be AO", () => {
+		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(["renamed-ao", "daemon"]) })).toBeNull();
+		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(["/opt/AO", "daemon"]) })).toBeNull();
+		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(["C:\\opt\\not-ao.exe", "daemon"]) }, "win32")).toBeNull();
+		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(["AO.EXE", "daemon"]) }, "win32")).not.toBeNull();
 	});
 
 	it.each([
 		["empty array", "[]"],
 		["empty executable", JSON.stringify(["", "daemon"])],
 		["blank executable", JSON.stringify(["   ", "daemon"])],
-		["empty argument", JSON.stringify(["ao", "", "daemon"])],
-		["non-string", JSON.stringify(["ao", 42, "daemon"])],
-		["NUL", JSON.stringify(["ao", "\u0000", "daemon"])],
+		["empty argument", JSON.stringify(["ao", "daemon", ""])],
+		["non-string", JSON.stringify(["ao", "daemon", 42])],
+		["NUL", JSON.stringify(["ao", "daemon", "\u0000"])],
 		["not JSON", '"ao", "daemon"'],
 	] as const)("rejects %s JSON argv", (_name, value) => {
 		expect(configured({ AO_DAEMON_ARGV: value })).toBeNull();

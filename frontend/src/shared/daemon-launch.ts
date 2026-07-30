@@ -4,35 +4,10 @@ export type DaemonLaunchSpec = {
 	cwd: string;
 	shell: false;
 	source: "configured" | "bundled" | "dev";
-	/** Index of the literal `daemon` subcommand in `args` for a configured launch. */
-	configuredDaemonArgIndex?: number;
 };
 
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const COMPATIBILITY_SHELL_SYNTAX = /[|&;<>()$`%!*?\[\]{}#~^]/;
-const SHELL_INTERPRETERS = new Set([
-	"bash",
-	"bash.exe",
-	"cmd",
-	"cmd.exe",
-	"command.com",
-	"csh",
-	"dash",
-	"fish",
-	"ksh",
-	"nu",
-	"powershell",
-	"powershell.exe",
-	"powershell_ise.exe",
-	"pwsh",
-	"pwsh.exe",
-	"sh",
-	"sh.exe",
-	"tcsh",
-	"wsl",
-	"wsl.exe",
-	"zsh",
-]);
 
 type ConfiguredArgvResolution = { present: false } | { present: true; argv: string[] | null };
 
@@ -127,24 +102,24 @@ function configuredArgv(env: Record<string, string | undefined>, platform: NodeJ
 	return { present: false };
 }
 
-function shellInterpreter(value: string): boolean {
+export function isDirectAoExecutable(value: string, platform: NodeJS.Platform): boolean {
+	if (CONTROL_CHARACTER.test(value)) return false;
 	const normalized = value.replace(/\\/g, "/");
-	return SHELL_INTERPRETERS.has(normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase());
+	const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
+	return platform === "win32"
+		? basename.toLowerCase() === "ao" || basename.toLowerCase() === "ao.exe"
+		: basename === "ao";
 }
 
-function configuredLaunch(argv: string[], cwd: string): DaemonLaunchSpec | null {
-	if (!argv[0] || argv[0].trim().length === 0) return null;
-	const daemonIndexes = argv.flatMap((value, index) => (value === "daemon" ? [index] : []));
-	if (daemonIndexes.length !== 1 || daemonIndexes[0] === 0) return null;
-	const daemonIndex = daemonIndexes[0];
-	if (argv.slice(0, daemonIndex).some(shellInterpreter)) return null;
+function configuredLaunch(argv: string[], cwd: string, platform: NodeJS.Platform): DaemonLaunchSpec | null {
+	if (!argv[0] || !isDirectAoExecutable(argv[0], platform)) return null;
+	if (argv[1] !== "daemon" || argv.slice(2).some((value) => value === "daemon")) return null;
 	return {
 		command: argv[0],
 		args: argv.slice(1),
 		cwd,
 		shell: false,
 		source: "configured",
-		configuredDaemonArgIndex: daemonIndex - 1,
 	};
 }
 
@@ -166,7 +141,7 @@ export function resolveDaemonLaunch(
 ): DaemonLaunchSpec | null {
 	const configured = configuredArgv(env, platform);
 	if (configured.present) {
-		return configured.argv ? configuredLaunch(configured.argv, appPath) : null;
+		return configured.argv ? configuredLaunch(configured.argv, appPath, platform) : null;
 	}
 
 	if (!isPackaged) {

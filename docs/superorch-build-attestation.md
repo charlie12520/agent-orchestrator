@@ -140,21 +140,29 @@ remain self-reported compatibility records, not authenticated provenance.
 ### Configured daemon argv
 
 `AO_DAEMON_ARGV` is the preferred configured-launch contract. Its value is a
-compact JSON array of non-empty strings containing the executable, any wrapper
-prefix, exactly one literal `daemon` element, and the daemon arguments:
+compact JSON array of non-empty strings containing a direct AO executable,
+followed immediately by one literal `daemon` element and the daemon arguments:
 
 ```json
 ["C:\\Program Files\\AO\\ao.exe", "daemon", "--port", "4317"]
 ```
 
-The desktop parses that array once into one executable/argv object. The actual
-launch uses the complete object. The preflight uses the same executable and the
-same argv prefix before `daemon`, replacing only `daemon` and its following
-arguments with `version --json`. Both processes use `shell:false`; JSON values
-such as spaces, `$()`, `%PATH%`, `!PATH!`, or `*` are therefore literal argv and
-are never expanded. Empty or non-string elements, controls including NUL, a
-missing or duplicate `daemon`, and explicit shell-interpreter prefixes are
-rejected.
+The executable basename must be `ao` (`ao` or `ao.exe` on Windows). The desktop
+parses the array once into one executable/argv object. The actual launch uses
+that exact executable with arguments beginning `daemon`; preflight uses the
+same executable with exactly `version --json`. Both processes use
+`shell:false`; JSON daemon-argument values such as spaces, `$()`, `%PATH%`,
+`!PATH!`, or `*` are therefore literal argv and are never expanded. Empty or
+non-string elements, controls including NUL, a missing or duplicate `daemon`,
+any pre-subcommand argument, and any wrapper or multiplexer executable are
+rejected before execution.
+
+Configured executable identity and its emitted attestation remain
+self-reported. Requiring the direct AO argv shape closes preflight/launch
+branching through wrappers; it does not cryptographically establish that a
+user-supplied file named `ao` is an official artifact. Bundled release
+consumption still requires the exact binary and matching sidecar, with external
+release signing/provenance responsible for artifact authenticity.
 
 `AO_DAEMON_COMMAND` remains only as a fail-closed migration path. It is no
 longer executed as a shell command. Its deliberately narrow compatibility
@@ -162,9 +170,12 @@ grammar accepts ASCII-space-separated argv, double-quoted paths on every
 platform, single-quoted paths only on POSIX, and POSIX backslash escaping. It
 rejects tabs/newlines and other controls, shell interpreters, expansions,
 substitutions, pipes/redirections, globs, metacharacters, unmatched or
-concatenated quotes, and a missing or duplicate literal `daemon`. Existing
-values that relied on shell behavior are intentionally incompatible and must
-move to `AO_DAEMON_ARGV`; the app rejects them before preflight or spawn.
+concatenated quotes, a non-AO executable, any argument before `daemon`, and a
+missing or duplicate literal `daemon`. Existing values that relied on shell
+behavior, `env`, `go run`, or another prefix wrapper are intentionally
+incompatible. Move environment settings into the desktop environment and
+supported AO daemon flags, then use the direct JSON argv form. Unsupported
+wrapper behavior is rejected before preflight or spawn.
 
 Daemon startup validates only attestation/build self-consistency. It does not
 require future integration capabilities to be true. The consuming adapter

@@ -1,6 +1,15 @@
 // @vitest-environment node
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	copyFileSync,
+	existsSync,
+	linkSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -15,6 +24,12 @@ const bundled: DaemonLaunchSpec = {
 	shell: false,
 	source: "bundled",
 };
+
+const gnuEnvExecutable = (
+	process.platform === "win32"
+		? ["C:\\Program Files\\Git\\usr\\bin\\env.exe", "C:\\Program Files\\Git\\bin\\env.exe"]
+		: ["/usr/bin/env", "/bin/env"]
+).find(existsSync);
 
 function attestation() {
 	return {
@@ -34,20 +49,50 @@ function runner(stdout: string, exitCode = 0): DaemonPreflightRunner {
 	return vi.fn().mockResolvedValue({ stdout, stderr: "", exitCode });
 }
 
-const actualRunner: DaemonPreflightRunner = async (spec) => {
-	const result = spawnSync(spec.command, spec.args, {
-		cwd: spec.cwd,
-		shell: spec.shell,
-		encoding: "utf8",
-		windowsHide: true,
-	});
-	return {
-		exitCode: result.status,
-		stdout: result.stdout ?? "",
-		stderr: result.stderr ?? "",
-		...(result.error ? { error: result.error.message } : {}),
+function processRunner(env: NodeJS.ProcessEnv): DaemonPreflightRunner {
+	return async (spec) => {
+		const result = spawnSync(spec.command, spec.args, {
+			cwd: spec.cwd,
+			shell: spec.shell,
+			encoding: "utf8",
+			env,
+			windowsHide: true,
+		});
+		return {
+			exitCode: result.status,
+			stdout: result.stdout ?? "",
+			stderr: result.stderr ?? "",
+			...(result.error ? { error: result.error.message } : {}),
+		};
 	};
-};
+}
+
+function fakeDirectAo(directory: string, argsPath: string): { executable: string; env: NodeJS.ProcessEnv } {
+	const executable = join(directory, process.platform === "win32" ? "ao.exe" : "ao");
+	try {
+		linkSync(process.execPath, executable);
+	} catch {
+		copyFileSync(process.execPath, executable);
+	}
+	if (process.platform !== "win32") chmodSync(executable, 0o755);
+
+	const preloadPath = join(directory, "fake-ao-preload.cjs");
+	writeFileSync(
+		preloadPath,
+		[
+			'const { appendFileSync } = require("node:fs");',
+			'const { basename } = require("node:path");',
+			'const subcommand = basename(process.argv[1] || "");',
+			`appendFileSync(${JSON.stringify(argsPath)}, JSON.stringify([subcommand, ...process.argv.slice(2)]) + "\\n");`,
+			`if (subcommand === "version") { process.stdout.write(${JSON.stringify(JSON.stringify(attestation()))}); process.exit(0); }`,
+			'if (subcommand === "daemon") process.exit(0);',
+			"process.exit(3);",
+		].join("\n"),
+		"utf8",
+	);
+	const requirePath = preloadPath.replace(/\\/g, "/");
+	return { executable, env: { ...process.env, NODE_OPTIONS: `--require=${JSON.stringify(requirePath)}` } };
+}
 
 const manifest = () => Promise.resolve(JSON.stringify(attestation()));
 
@@ -71,18 +116,17 @@ describe("daemon candidate preflight", () => {
 		});
 	});
 
-	it("uses the exact configured executable and prefix for version preflight", async () => {
+	it("uses the exact direct configured executable with no prefix for version preflight", async () => {
 		const configured: DaemonLaunchSpec = {
 			...bundled,
 			source: "configured",
-			command: "go",
-			args: ["run", "./cmd/ao", "daemon", "--port", "4317"],
-			configuredDaemonArgIndex: 2,
+			command: "/opt/ao",
+			args: ["daemon", "--port", "4317"],
 		};
 		const run = runner(JSON.stringify(attestation()));
 		expect(daemonPreflightSpec(configured)).toEqual({
-			command: "go",
-			args: ["run", "./cmd/ao", "version", "--json"],
+			command: "/opt/ao",
+			args: ["version", "--json"],
 			cwd: configured.cwd,
 			shell: false,
 		});
@@ -90,51 +134,47 @@ describe("daemon candidate preflight", () => {
 		expect(run).toHaveBeenCalledOnce();
 	});
 
-	it("refuses configured argv when its pre-spawn version probe is incompatible", async () => {
-		const configured: DaemonLaunchSpec = {
-			...bundled,
-			source: "configured",
-			configuredDaemonArgIndex: 0,
-		};
+	it("refuses configured argv when its direct pre-spawn version probe is incompatible", async () => {
+		const configured: DaemonLaunchSpec = { ...bundled, source: "configured", command: "/opt/ao" };
 		const run = runner(JSON.stringify({ version: "legacy" }));
 		expect(await preflightDaemonLaunch(configured, run)).toContain("compatibility attestation");
 		expect(run).toHaveBeenCalledOnce();
 	});
 
-	it("executes JSON preflight and daemon argv literally through a path containing shell attacks", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "ao argv $(not-expanded) "));
+	it("executes direct JSON and legacy AO paths with identical commands and no shell", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "ao direct path "));
 		try {
-			const scriptPath = join(directory, "fake ao.cjs");
 			const argsPath = join(directory, "args.jsonl");
-			writeFileSync(
-				scriptPath,
-				[
-					'const { appendFileSync } = require("node:fs");',
-					`appendFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
-					`if (process.argv[2] === "version") process.stdout.write(${JSON.stringify(JSON.stringify(attestation()))});`,
-				].join("\n"),
-				"utf8",
-			);
-			const argv = [process.execPath, scriptPath, "daemon", "--port", "4317", "--label", "$(literal) * %PATH% !PATH!"];
-			const launch = resolveDaemonLaunch(
-				{ AO_DAEMON_ARGV: JSON.stringify(argv) },
-				true,
-				directory,
-				directory,
-				directory,
-				process.platform,
-			);
-			expect(launch).not.toBeNull();
-			if (!launch) throw new Error("configured launch was not resolved");
+			const fake = fakeDirectAo(directory, argsPath);
+			const daemonArgs = ["daemon", "--port", "4317", "--label", "$(literal) * %PATH% !PATH!"];
+			const environments = [
+				{ AO_DAEMON_ARGV: JSON.stringify([fake.executable, ...daemonArgs]) },
+				{ AO_DAEMON_COMMAND: `"${fake.executable}" daemon --port 4317` },
+			];
 
-			expect(await preflightDaemonLaunch(launch, actualRunner)).toBeNull();
-			const daemonResult = spawnSync(launch.command, launch.args, {
-				cwd: launch.cwd,
-				shell: launch.shell,
-				encoding: "utf8",
-				windowsHide: true,
-			});
-			expect(daemonResult.status).toBe(0);
+			for (const configuredEnv of environments) {
+				const launch = resolveDaemonLaunch(configuredEnv, true, directory, directory, directory, process.platform);
+				expect(launch).not.toBeNull();
+				if (!launch) throw new Error("direct configured launch was not resolved");
+				expect(daemonPreflightSpec(launch)).toEqual({
+					command: fake.executable,
+					args: ["version", "--json"],
+					cwd: directory,
+					shell: false,
+				});
+				expect(await preflightDaemonLaunch(launch, processRunner(fake.env))).toBeNull();
+				const daemonResult = spawnSync(launch.command, launch.args, {
+					cwd: launch.cwd,
+					shell: launch.shell,
+					encoding: "utf8",
+					env: fake.env,
+					windowsHide: true,
+				});
+				expect(daemonResult.status).toBe(0);
+				expect(launch.command).toBe(fake.executable);
+				expect(launch.args[0]).toBe("daemon");
+			}
+
 			const invocations = readFileSync(argsPath, "utf8")
 				.trim()
 				.split("\n")
@@ -142,54 +182,85 @@ describe("daemon candidate preflight", () => {
 			expect(invocations).toEqual([
 				["version", "--json"],
 				["daemon", "--port", "4317", "--label", "$(literal) * %PATH% !PATH!"],
+				["version", "--json"],
+				["daemon", "--port", "4317"],
 			]);
-			expect(launch).toMatchObject({
-				command: process.execPath,
-				args: argv.slice(1),
-				shell: false,
-				configuredDaemonArgIndex: 1,
-			});
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
 	});
 
-	it("executes the legacy quoted-path compatibility form with shell disabled", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "ao legacy argv "));
+	it.skipIf(!gnuEnvExecutable)("rejects the live GNU env -S version/daemon branching bypass before execution", () => {
+		if (!gnuEnvExecutable) throw new Error("GNU env is unavailable");
+		const directory = mkdtempSync(join(tmpdir(), "ao env-s branch "));
 		try {
-			const scriptPath = join(directory, "fake ao.cjs");
+			const scriptPath = join(directory, "branch.cjs");
+			const sentinelPath = join(directory, "daemon-branch-ran");
 			writeFileSync(
 				scriptPath,
-				`if (process.argv[2] === "version") process.stdout.write(${JSON.stringify(JSON.stringify(attestation()))});`,
+				[
+					'const { writeFileSync } = require("node:fs");',
+					`if (process.argv[2] === "version") { process.stdout.write(${JSON.stringify(JSON.stringify(attestation()))}); process.exit(0); }`,
+					`if (process.argv[2] === "daemon") { writeFileSync(${JSON.stringify(sentinelPath)}, "ran"); process.exit(0); }`,
+					"process.exit(3);",
+				].join("\n"),
 				"utf8",
 			);
+			const splitCommand = `"${process.execPath.replace(/\\/g, "/")}" "${scriptPath.replace(/\\/g, "/")}"`;
+
+			const liveVersion = spawnSync(gnuEnvExecutable, ["-S", splitCommand, "version", "--json"], {
+				cwd: directory,
+				encoding: "utf8",
+				windowsHide: true,
+			});
+			expect(liveVersion.status).toBe(0);
+			expect(JSON.parse(liveVersion.stdout)).toMatchObject({ distribution: EXPECTED_DAEMON_ATTESTATION.distribution });
+			const liveDaemon = spawnSync(gnuEnvExecutable, ["-S", splitCommand, "daemon", "--port", "4317"], {
+				cwd: directory,
+				encoding: "utf8",
+				windowsHide: true,
+			});
+			expect(liveDaemon.status).toBe(0);
+			expect(existsSync(sentinelPath)).toBe(true);
+			rmSync(sentinelPath);
+
+			const bypassArgv = [gnuEnvExecutable, "-S", splitCommand, "daemon", "--port", "4317"];
 			const launch = resolveDaemonLaunch(
-				{ AO_DAEMON_COMMAND: `"${process.execPath}" "${scriptPath}" daemon --port 4317` },
+				{ AO_DAEMON_ARGV: JSON.stringify(bypassArgv) },
 				true,
 				directory,
 				directory,
 				directory,
 				process.platform,
 			);
-			expect(launch).not.toBeNull();
-			if (!launch) throw new Error("legacy configured launch was not resolved");
-			expect(await preflightDaemonLaunch(launch, actualRunner)).toBeNull();
-			expect(daemonPreflightSpec(launch)).toEqual({
-				command: launch.command,
-				args: [scriptPath, "version", "--json"],
-				cwd: directory,
-				shell: false,
-			});
-			expect(launch.args).toEqual([scriptPath, "daemon", "--port", "4317"]);
+			if (launch) spawnSync(launch.command, launch.args, { cwd: launch.cwd, shell: launch.shell });
+			expect(launch).toBeNull();
+			expect(existsSync(sentinelPath)).toBe(false);
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
 	});
 
-	it("refuses configured launch metadata without invoking a runner", async () => {
-		const configured: DaemonLaunchSpec = { ...bundled, source: "configured" };
+	it("refuses configured launch metadata with a prefix before invoking a runner", async () => {
+		const configured: DaemonLaunchSpec = {
+			...bundled,
+			source: "configured",
+			command: "/usr/bin/env",
+			args: ["-S", "branch-on-subcommand", "daemon"],
+		};
 		const run = runner(JSON.stringify(attestation()));
-		expect(await preflightDaemonLaunch(configured, run)).toContain("exactly one literal daemon subcommand");
+		expect(await preflightDaemonLaunch(configured, run)).toContain("begin with one literal daemon subcommand");
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("refuses non-AO configured executable metadata before invoking a runner", async () => {
+		const configured: DaemonLaunchSpec = {
+			...bundled,
+			source: "configured",
+			command: process.platform === "win32" ? "C:\\tools\\env.exe" : "/usr/bin/env",
+		};
+		const run = runner(JSON.stringify(attestation()));
+		expect(await preflightDaemonLaunch(configured, run)).toContain("direct executable");
 		expect(run).not.toHaveBeenCalled();
 	});
 

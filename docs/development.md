@@ -170,7 +170,11 @@ For an external daemon executable, prefer `AO_DAEMON_ARGV` with a compact JSON
 string array such as `["C:\\Program Files\\AO\\ao.exe","daemon"]`.
 `AO_DAEMON_COMMAND` is a strict, shell-free compatibility parser and no longer
 supports expansion, pipelines, redirection, globs, control characters, or shell
-wrappers. Migrate any value that relied on shell behavior to JSON argv.
+wrappers. Both forms require a direct executable named `ao`/`ao.exe` followed
+immediately by `daemon`; `env`, `go run`, shell/multiplexer prefixes, and
+pre-subcommand global flags are unsupported. Put environment settings in the
+desktop environment and use supported daemon flags after `daemon`, then migrate
+to JSON argv.
 
 On a fresh Linux machine, treat `npm run package` as the default local build
 path. `npm run make` also needs Linux packaging tools that are not provided by a

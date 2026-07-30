@@ -782,7 +782,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		setDaemonStatus({
 			state: "error",
 			message:
-				"AO daemon configuration was rejected. Set AO_DAEMON_ARGV to a JSON string array containing one literal daemon subcommand, or migrate the legacy AO_DAEMON_COMMAND value to its strict argv grammar.",
+				'AO daemon configuration was rejected. Set AO_DAEMON_ARGV to ["/path/to/ao","daemon",...] with no wrapper or pre-subcommand arguments, or migrate AO_DAEMON_COMMAND to that direct shape.',
 			code: "spawn_failed",
 		});
 		return daemonStatus;
