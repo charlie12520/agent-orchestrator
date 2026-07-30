@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
+	yaml "gopkg.in/yaml.v3"
 )
 
 // TestDefaultLoadsEmbeddedSpec is the smoke test for //go:embed wiring:
@@ -67,5 +68,69 @@ func TestServeYAML(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "openapi: 3.1.0") {
 		t.Errorf("body did not begin with an OpenAPI 3.1 doc")
+	}
+}
+
+func TestExecutionSpecRequiresManagedAndIdempotencyHeaders(t *testing.T) {
+	op := apispec.Default().Operation(http.MethodPost, "/api/v1/execution/operations")
+	if op == nil {
+		t.Fatal("execution operation missing from embedded spec")
+	}
+	params, ok := op["parameters"].([]any)
+	if !ok {
+		t.Fatalf("execution parameters = %#v", op["parameters"])
+	}
+	required := map[string]bool{
+		"Authorization":          false,
+		"X-AO-Daemon-Generation": false,
+		"Idempotency-Key":        false,
+	}
+	for _, raw := range params {
+		param, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := param["name"].(string)
+		if _, tracked := required[name]; tracked && param["required"] == true {
+			required[name] = true
+		}
+	}
+	for name, found := range required {
+		if !found {
+			t.Errorf("required execution header %q missing", name)
+		}
+	}
+}
+
+func TestExecutionSpecDoesNotExposeOpaqueResults(t *testing.T) {
+	var document struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]any `yaml:"properties"`
+			} `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(apispec.Default().YAML(), &document); err != nil {
+		t.Fatalf("parse embedded spec: %v", err)
+	}
+	for _, response := range []struct {
+		name           string
+		safeProperties []string
+	}{
+		{name: "ExecuteOperationResponse", safeProperties: []string{"runId", "processGeneration", "state"}},
+		{name: "ExecutionOperationResponse", safeProperties: []string{"resultRunId", "resultProcessGeneration", "targetProcessGeneration", "state"}},
+	} {
+		schema, found := document.Components.Schemas[response.name]
+		if !found {
+			t.Fatalf("schema %q missing", response.name)
+		}
+		for _, property := range response.safeProperties {
+			if _, found := schema.Properties[property]; !found {
+				t.Fatalf("schema %q missing safe metadata property %q", response.name, property)
+			}
+		}
+		if _, exposed := schema.Properties["result"]; exposed {
+			t.Fatalf("schema %q exposed opaque result property", response.name)
+		}
 	}
 }

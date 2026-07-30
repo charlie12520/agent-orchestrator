@@ -123,6 +123,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/execution/bindings/{externalRunId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read one sanitized durable execution run binding */
+        get: operations["getExecutionBinding"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/execution/operations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Accept or exactly replay one managed execution mutation */
+        post: operations["executeOperation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/execution/operations/{operationId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read one sanitized durable execution operation */
+        get: operations["getExecutionOperation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/import": {
         parameters: {
             query?: never;
@@ -1075,6 +1126,73 @@ export interface components {
         };
         DomainReviewerConfig: {
             harness: string;
+        };
+        ExecuteOperationRequest: {
+            /** Format: int64 */
+            expectedProcessGeneration?: number;
+            externalRunId: string;
+            idempotencyKey: string;
+            /** @enum {string} */
+            operation: "launch" | "send" | "interrupt" | "resume" | "restore" | "stop" | "cleanup";
+            request: {
+                [key: string]: unknown;
+            };
+            runId?: string;
+            /** @enum {integer} */
+            version: 1;
+        };
+        ExecuteOperationResponse: {
+            externalRunId: string;
+            /** @enum {string} */
+            operation: "launch" | "send" | "interrupt" | "resume" | "restore" | "stop" | "cleanup";
+            operationId: string;
+            /** Format: int64 */
+            processGeneration: number;
+            replayed: boolean;
+            runId?: string;
+            /** @enum {string} */
+            state: "accepted" | "dispatched" | "result" | "ambiguous";
+            /** @enum {integer} */
+            version: 1;
+        };
+        ExecutionBindingResponse: {
+            /** Format: date-time */
+            createdAt: string;
+            externalRunId: string;
+            pendingOperationId?: string;
+            /** Format: int64 */
+            processGeneration: number;
+            runId?: string;
+            /** @enum {string} */
+            state: "launching" | "active" | "stopped" | "cleaned" | "busy" | "ambiguous";
+            /** Format: date-time */
+            updatedAt: string;
+            /** @enum {integer} */
+            version: 1;
+        };
+        ExecutionOperationResponse: {
+            /** Format: date-time */
+            acceptedAt: string;
+            /** Format: date-time */
+            completedAt?: string;
+            /** Format: date-time */
+            dispatchedAt?: string;
+            /** Format: int64 */
+            expectedProcessGeneration?: number;
+            externalRunId: string;
+            /** @enum {string} */
+            operation: "launch" | "send" | "interrupt" | "resume" | "restore" | "stop" | "cleanup";
+            operationId: string;
+            /** Format: int64 */
+            resultProcessGeneration?: number;
+            resultRunId?: string;
+            runId?: string;
+            /** @enum {string} */
+            state: "accepted" | "dispatched" | "result" | "ambiguous";
+            /** Format: int64 */
+            targetProcessGeneration: number;
+            /** @enum {integer} */
+            version: 1;
         };
         ImportReport: {
             dryRun: boolean;
@@ -2118,6 +2236,244 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getExecutionBinding: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Exact managed-daemon bearer credential. */
+                Authorization: string;
+                /** @description Exact current managed-daemon generation. */
+                "X-AO-Daemon-Generation": string;
+            };
+            path: {
+                externalRunId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionBindingResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    executeOperation: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Exact managed-daemon bearer credential. */
+                Authorization: string;
+                /** @description Exact current managed-daemon generation. */
+                "X-AO-Daemon-Generation": string;
+                /** @description Must exactly equal the canonical request body's idempotencyKey. */
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExecuteOperationRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecuteOperationResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getExecutionOperation: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Exact managed-daemon bearer credential. */
+                Authorization: string;
+                /** @description Exact current managed-daemon generation. */
+                "X-AO-Daemon-Generation": string;
+            };
+            path: {
+                operationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionOperationResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

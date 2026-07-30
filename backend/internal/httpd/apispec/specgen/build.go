@@ -81,6 +81,8 @@ func Build() ([]byte, error) {
 			"Target-isolated desktop browser runtime (loopback only)"),
 		*(&openapi31.Tag{Name: "integration"}).WithDescription(
 			"Root-authenticated deterministic integration leases and brokered merges"),
+		*(&openapi31.Tag{Name: "execution"}).WithDescription(
+			"Managed primary-loopback execution mutation and sanitized journal reads"),
 	}
 
 	for _, op := range operations() {
@@ -149,6 +151,9 @@ var schemaNames = map[string]string{
 	"DomainIntegrationCheckEvidence":  "IntegrationCheckEvidence",
 	"DomainIntegrationReviewEvidence": "IntegrationReviewEvidence",
 	"DomainIntegrationMergeOutcome":   "IntegrationMergeOutcome",
+	"DomainExecutionOperation":        "ExecutionOperation",
+	"DomainExecutionJournalState":     "ExecutionJournalState",
+	"DomainExecutionRunBindingState":  "ExecutionRunBindingState",
 	// httpd/controllers (wire envelopes)
 	"ControllersListProjectsResponse":             "ListProjectsResponse",
 	"ControllersProjectResponse":                  "ProjectResponse",
@@ -234,6 +239,15 @@ var schemaNames = map[string]string{
 	"ControllersRevokeIntegrationMergeLeaseResponse": "RevokeIntegrationMergeLeaseResponse",
 	"ControllersConsumeIntegrationMergeRequest":      "ConsumeIntegrationMergeRequest",
 	"ControllersConsumeIntegrationMergeResponse":     "ConsumeIntegrationMergeResponse",
+	// httpd/controllers - managed execution wire envelopes
+	"ControllersExecuteOperationRequest":     "ExecuteOperationRequest",
+	"ControllersExecutionIdempotencyHeader":  "ExecutionIdempotencyHeader",
+	"ControllersExecutionManagedHeaders":     "ExecutionManagedHeaders",
+	"ControllersExecutionOperationIDParam":   "ExecutionOperationIDParam",
+	"ControllersExecutionExternalRunIDParam": "ExecutionExternalRunIDParam",
+	"ControllersExecuteOperationResponse":    "ExecuteOperationResponse",
+	"ControllersExecutionOperationResponse":  "ExecutionOperationResponse",
+	"ControllersExecutionBindingResponse":    "ExecutionBindingResponse",
 	// httpd/controllers — review wire envelopes
 	"ControllersListReviewsResponse":   "ListReviewsResponse",
 	"ControllersReviewRunResponse":     "ReviewRunResponse",
@@ -361,7 +375,55 @@ func operations() []operation {
 	ops = append(ops, browserOperations()...)
 	ops = append(ops, shellTerminalOperations()...)
 	ops = append(ops, integrationMergeOperations()...)
+	ops = append(ops, executionOperations()...)
 	return ops
+}
+
+func executionOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/execution/operations", id: "executeOperation", tag: "execution",
+			summary:    "Accept or exactly replay one managed execution mutation",
+			pathParams: []any{controllers.ExecutionManagedHeaders{}, controllers.ExecutionIdempotencyHeader{}},
+			reqBody:    controllers.ExecuteOperationRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ExecuteOperationResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusRequestEntityTooLarge, envelope.APIError{}},
+				{http.StatusUnsupportedMediaType, envelope.APIError{}},
+				{http.StatusServiceUnavailable, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/execution/operations/{operationId}", id: "getExecutionOperation", tag: "execution",
+			summary:    "Read one sanitized durable execution operation",
+			pathParams: []any{controllers.ExecutionManagedHeaders{}, controllers.ExecutionOperationIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ExecutionOperationResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusServiceUnavailable, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/execution/bindings/{externalRunId}", id: "getExecutionBinding", tag: "execution",
+			summary:    "Read one sanitized durable execution run binding",
+			pathParams: []any{controllers.ExecutionManagedHeaders{}, controllers.ExecutionExternalRunIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ExecutionBindingResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusServiceUnavailable, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func integrationMergeOperations() []operation {
