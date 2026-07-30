@@ -244,6 +244,96 @@ func TestCandidateRevalidationMatrix(t *testing.T) {
 	}
 }
 
+func TestRequireAllObservedPassingPolicyMatrix(t *testing.T) {
+	optionalCheck := func(status string) domain.IntegrationCheckEvidence {
+		return domain.IntegrationCheckEvidence{
+			Name: "optional-lint", HeadSHA: strings.Repeat("a", 40),
+			Status: status, CompletedAt: testNow.Add(-time.Minute),
+		}
+	}
+	tests := []struct {
+		name          string
+		leaseFlag     bool
+		candidateFlag bool
+		mutate        func(*domain.IntegrationMergeCandidate)
+		wantReason    string
+	}{
+		{name: "false allows optional pending", mutate: func(c *domain.IntegrationMergeCandidate) { c.Checks = append(c.Checks, optionalCheck("pending")) }},
+		{name: "false allows optional failing", mutate: func(c *domain.IntegrationMergeCandidate) { c.Checks = append(c.Checks, optionalCheck("failing")) }},
+		{name: "true allows optional passing", leaseFlag: true, candidateFlag: true, mutate: func(c *domain.IntegrationMergeCandidate) { c.Checks = append(c.Checks, optionalCheck("passing")) }},
+		{name: "true blocks optional pending", leaseFlag: true, candidateFlag: true, mutate: func(c *domain.IntegrationMergeCandidate) { c.Checks = append(c.Checks, optionalCheck("pending")) }, wantReason: "checks_pending"},
+		{name: "true blocks optional failing", leaseFlag: true, candidateFlag: true, mutate: func(c *domain.IntegrationMergeCandidate) { c.Checks = append(c.Checks, optionalCheck("failing")) }, wantReason: "checks_failing"},
+		{name: "false still blocks required pending", mutate: func(c *domain.IntegrationMergeCandidate) { c.Checks[0].Status = "pending" }, wantReason: "checks_pending"},
+		{name: "false still blocks required failing", mutate: func(c *domain.IntegrationMergeCandidate) { c.Checks[0].Status = "failing" }, wantReason: "checks_failing"},
+		{name: "false still validates optional status", mutate: func(c *domain.IntegrationMergeCandidate) { c.Checks = append(c.Checks, optionalCheck("unknown")) }, wantReason: "invalid_check_evidence"},
+		{name: "false still validates optional head", mutate: func(c *domain.IntegrationMergeCandidate) {
+			check := optionalCheck("passing")
+			check.HeadSHA = strings.Repeat("c", 40)
+			c.Checks = append(c.Checks, check)
+		}, wantReason: "check_evidence_not_exact_head"},
+		{name: "flag drift remains bound", candidateFlag: true, wantReason: "check_policy_drift"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, store, broker, issued := newTestService(t, func(in *IssueLeaseInput) {
+				in.CheckPolicy.RequireAllObservedPassing = tc.leaseFlag
+			})
+			broker.candidate.CheckPolicy.RequireAllObservedPassing = tc.candidateFlag
+			if tc.mutate != nil {
+				tc.mutate(&broker.candidate)
+			}
+			out, err := svc.Merge(context.Background(), mergeInput(issued, "check-policy-operation-01"))
+			if tc.wantReason == "" {
+				if err != nil || out.Status != domain.IntegrationMergeOutcomeMerged || broker.mergeCalls != 1 {
+					t.Fatalf("merge=%#v err=%v calls=%d", out, err, broker.mergeCalls)
+				}
+				return
+			}
+			assertCodeReason(t, err, CodeRevalidationRequired, tc.wantReason)
+			if broker.mergeCalls != 0 || store.lease.Status != domain.IntegrationMergeLeaseActive || store.journal.IdempotencyKey != "" {
+				t.Fatalf("rejected policy changed state: calls=%d lease=%s journal=%q", broker.mergeCalls, store.lease.Status, store.journal.IdempotencyKey)
+			}
+		})
+	}
+}
+
+func TestRequireResolvedThreadsPolicyMatrix(t *testing.T) {
+	tests := []struct {
+		name          string
+		leaseFlag     bool
+		candidateFlag bool
+		threads       int
+		wantReason    string
+	}{
+		{name: "false allows unresolved threads", threads: 2},
+		{name: "false allows zero threads"},
+		{name: "true allows zero threads", leaseFlag: true, candidateFlag: true},
+		{name: "true blocks unresolved threads", leaseFlag: true, candidateFlag: true, threads: 2, wantReason: "unresolved_review_threads"},
+		{name: "false still rejects invalid count", threads: -1, wantReason: "invalid_review_thread_count"},
+		{name: "flag drift remains bound", candidateFlag: true, wantReason: "review_policy_drift"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, store, broker, issued := newTestService(t, func(in *IssueLeaseInput) {
+				in.ReviewPolicy.RequireResolvedThreads = tc.leaseFlag
+			})
+			broker.candidate.ReviewPolicy.RequireResolvedThreads = tc.candidateFlag
+			broker.candidate.UnresolvedReviewThreads = tc.threads
+			out, err := svc.Merge(context.Background(), mergeInput(issued, "review-policy-operation-01"))
+			if tc.wantReason == "" {
+				if err != nil || out.Status != domain.IntegrationMergeOutcomeMerged || broker.mergeCalls != 1 {
+					t.Fatalf("merge=%#v err=%v calls=%d", out, err, broker.mergeCalls)
+				}
+				return
+			}
+			assertCodeReason(t, err, CodeRevalidationRequired, tc.wantReason)
+			if broker.mergeCalls != 0 || store.lease.Status != domain.IntegrationMergeLeaseActive || store.journal.IdempotencyKey != "" {
+				t.Fatalf("rejected policy changed state: calls=%d lease=%s journal=%q", broker.mergeCalls, store.lease.Status, store.journal.IdempotencyKey)
+			}
+		})
+	}
+}
+
 func TestDefaultSquashSuccessAndIdempotency(t *testing.T) {
 	svc, store, broker, issued := newTestService(t, nil)
 	in := mergeInput(issued, "operation-01")

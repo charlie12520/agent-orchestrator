@@ -241,7 +241,10 @@ func walkUniqueJSONValue(dec *json.Decoder, depth int) error {
 			if !ok {
 				return errors.New("JSON object member must be a string")
 			}
-			canonical := strings.ToLower(key)
+			canonical, err := canonicalJSONMemberName(key)
+			if err != nil {
+				return err
+			}
 			if _, duplicate := seen[canonical]; duplicate {
 				return errors.New("duplicate JSON object member")
 			}
@@ -275,6 +278,20 @@ func walkUniqueJSONValue(dec *json.Decoder, depth int) error {
 	default:
 		return errors.New("unexpected JSON delimiter")
 	}
+}
+
+func canonicalJSONMemberName(key string) (string, error) {
+	// Every field name in this contract is ASCII. Fail closed before binding
+	// any non-ASCII spelling because encoding/json uses Unicode simple-fold
+	// equivalence (for example long-s with S and Kelvin-sign with K), which is
+	// broader than Unicode lowercasing and could otherwise bypass collision
+	// detection. Escaped names arrive here decoded and are rejected identically.
+	for i := 0; i < len(key); i++ {
+		if key[i] >= 0x80 {
+			return "", errors.New("non-ASCII JSON object member")
+		}
+	}
+	return strings.ToLower(key), nil
 }
 
 func writeIntegrationMergeInvalidJSON(w http.ResponseWriter, r *http.Request) {

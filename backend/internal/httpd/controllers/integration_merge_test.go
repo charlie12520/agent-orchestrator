@@ -177,6 +177,8 @@ func TestIntegrationMergeControllerBoundsAndSafeErrors(t *testing.T) {
 func TestIntegrationMergeControllerRejectsDuplicateAndMalformedJSONBeforeBinding(t *testing.T) {
 	manager := &fakeIntegrationMergeManager{}
 	srv := integrationMergeServer(t, manager)
+	longS := "\u017f"
+	kelvin := "\u212a"
 	tests := []struct {
 		name string
 		path string
@@ -198,6 +200,26 @@ func TestIntegrationMergeControllerRejectsDuplicateAndMalformedJSONBeforeBinding
 			body: `{"integrationLease":"iml_first-valid-shape","integrationLeas\u0065":"iml_second-valid-shape","gateCapability":"secret-value","idempotencyKey":"operation-01"}`,
 		},
 		{
+			name: "literal top-level long-s alias collision",
+			path: "/api/v1/integration/merges",
+			body: `{"integrationLease":"iml_first-valid-shape","integrationLea` + longS + `e":"iml_second-valid-shape"}`,
+		},
+		{
+			name: "escaped top-level long-s alias collision",
+			path: "/api/v1/integration/merges",
+			body: `{"integrationLease":"iml_first-valid-shape","integrationLea\u017fe":"iml_second-valid-shape"}`,
+		},
+		{
+			name: "literal top-level Kelvin alias collision",
+			path: "/api/v1/integration/merges",
+			body: `{"idempotencyKey":"operation-01","idempotency` + kelvin + `ey":"operation-02"}`,
+		},
+		{
+			name: "escaped top-level Kelvin alias collision",
+			path: "/api/v1/integration/merges",
+			body: `{"idempotencyKey":"operation-01","idempotency\u212aey":"operation-02"}`,
+		},
+		{
 			name: "nested check-policy duplicate",
 			path: "/api/v1/integration/merge-leases",
 			body: `{"checkPolicy":{"revision":"checks-v1","revision":"checks-v2"}}`,
@@ -206,6 +228,26 @@ func TestIntegrationMergeControllerRejectsDuplicateAndMalformedJSONBeforeBinding
 			name: "nested review-policy duplicate",
 			path: "/api/v1/integration/merge-leases",
 			body: `{"reviewPolicy":{"requiredApprovals":1,"requiredApprovals":2}}`,
+		},
+		{
+			name: "literal nested long-s alias collision",
+			path: "/api/v1/integration/merge-leases",
+			body: `{"reviewPolicy":{"requireResolvedThreads":true,"requireRe` + longS + `olvedThreads":false}}`,
+		},
+		{
+			name: "escaped nested long-s alias collision",
+			path: "/api/v1/integration/merge-leases",
+			body: `{"reviewPolicy":{"requireResolvedThreads":true,"requireRe\u017folvedThreads":false}}`,
+		},
+		{
+			name: "literal nested Kelvin alias collision",
+			path: "/api/v1/integration/merge-leases",
+			body: `{"checkPolicy":{"requiredChecks":["build"],"requiredChec` + kelvin + `s":["test"]}}`,
+		},
+		{
+			name: "escaped nested Kelvin alias collision",
+			path: "/api/v1/integration/merge-leases",
+			body: `{"checkPolicy":{"requiredChecks":["build"],"requiredChec\u212as":["test"]}}`,
 		},
 		{
 			name: "trailing value",

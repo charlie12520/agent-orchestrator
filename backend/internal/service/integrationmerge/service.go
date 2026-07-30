@@ -856,6 +856,8 @@ func candidateRevalidationReason(lease domain.IntegrationMergeLease, candidate d
 		return "check_evidence_unbounded"
 	}
 	checks := make(map[string]domain.IntegrationCheckEvidence, len(candidate.Checks))
+	observedPending := false
+	observedFailing := false
 	for _, check := range candidate.Checks {
 		checkHead, validHead := normalizeSHA(check.HeadSHA)
 		if check.Name == "" || len(check.Name) > 128 || !validHead || checkHead != lease.ExpectedHeadSHA {
@@ -867,7 +869,22 @@ func candidateRevalidationReason(lease domain.IntegrationMergeLease, candidate d
 		if _, duplicate := checks[check.Name]; duplicate {
 			return "duplicate_check_evidence"
 		}
+		switch check.Status {
+		case "passing":
+		case "pending":
+			observedPending = true
+		case "failing":
+			observedFailing = true
+		default:
+			return "invalid_check_evidence"
+		}
 		checks[check.Name] = check
+	}
+	for _, required := range lease.CheckPolicy.RequiredChecks {
+		check, ok := checks[required]
+		if !ok {
+			return "required_check_missing"
+		}
 		if check.Status == "pending" {
 			return "checks_pending"
 		}
@@ -875,9 +892,12 @@ func candidateRevalidationReason(lease domain.IntegrationMergeLease, candidate d
 			return "checks_failing"
 		}
 	}
-	for _, required := range lease.CheckPolicy.RequiredChecks {
-		if check, ok := checks[required]; !ok || check.Status != "passing" {
-			return "required_check_missing"
+	if lease.CheckPolicy.RequireAllObservedPassing {
+		if observedPending {
+			return "checks_pending"
+		}
+		if observedFailing {
+			return "checks_failing"
 		}
 	}
 	if len(candidate.Reviews) > maxEvidence {
@@ -927,7 +947,7 @@ func candidateRevalidationReason(lease domain.IntegrationMergeLease, candidate d
 	if candidate.UnresolvedReviewThreads < 0 || candidate.UnresolvedReviewThreads > 100_000 {
 		return "invalid_review_thread_count"
 	}
-	if candidate.UnresolvedReviewThreads != 0 {
+	if lease.ReviewPolicy.RequireResolvedThreads && candidate.UnresolvedReviewThreads != 0 {
 		return "unresolved_review_threads"
 	}
 	return ""
