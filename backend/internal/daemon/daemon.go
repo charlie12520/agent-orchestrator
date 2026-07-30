@@ -6,6 +6,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
+	"github.com/aoagents/agent-orchestrator/backend/internal/managedcontrol"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/notify"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -41,13 +43,36 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
 )
 
+type RunOptions struct {
+	ManagedBootstrap io.Reader
+}
+
 // Run starts the daemon and blocks until it exits. SIGINT/SIGTERM drive
 // graceful shutdown through the HTTP server and background workers.
 func Run() error {
+	return RunWithOptions(RunOptions{})
+}
+
+// RunWithOptions starts the daemon with optional hidden supervisor-only control
+// bootstrap. Managed bootstrap is read before config loading or any durable
+// mutation so malformed supervisor launches fail closed.
+func RunWithOptions(opts RunOptions) error {
 	// A release with ambiguous identity must stop before config loading, storage
 	// migration, or any other durable mutation.
 	if err := daemonmeta.ValidateBuildIdentity(); err != nil {
 		return fmt.Errorf("validate build identity: %w", err)
+	}
+	var managedRuntime *managedcontrol.Runtime
+	if opts.ManagedBootstrap != nil {
+		runtime, err := managedcontrol.LoadProcessBootstrap(opts.ManagedBootstrap)
+		if closer, ok := opts.ManagedBootstrap.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if err != nil {
+			return fmt.Errorf("managed control bootstrap: %w", err)
+		}
+		managedRuntime = runtime
+		defer managedRuntime.Close()
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -249,7 +274,7 @@ func Run() error {
 		go dispatcher.Run(ctx)
 	}
 
-	srv, err := httpd.NewWithDeps(cfg, log, termMgr, httpd.APIDeps{
+	srv, err := httpd.NewWithDeps(cfg, log, termMgr, managedRuntime, httpd.APIDeps{
 		Projects:           projectSvc,
 		Agents:             agentSvc,
 		Sessions:           sessionSvc,

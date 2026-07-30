@@ -33,7 +33,7 @@ type LANManager struct {
 func NewLANManager(handler http.Handler, state *authState, defaultPort int, log *slog.Logger) *LANManager {
 	lock := newLockout(5, time.Minute, time.Now)
 	return &LANManager{
-		handler:     lanControlBlock(authMiddleware(state, lock)(handler)),
+		handler:     markTransportScope(transportScopeLAN, lanControlBlock(authMiddleware(state, lock)(handler))),
 		defaultPort: defaultPort,
 		log:         loggerOrDefault(log),
 		state:       state,

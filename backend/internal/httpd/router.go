@@ -3,11 +3,15 @@
 package httpd
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -17,6 +21,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
+	"github.com/aoagents/agent-orchestrator/backend/internal/managedcontrol"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/telemetrymeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
@@ -43,13 +48,15 @@ type ControlDeps struct {
 //
 // The per-request timeout is deliberately not global: it wraps only bounded
 // REST routes, never long-lived terminal streams or health probes.
-func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager, deps APIDeps, control ControlDeps) chi.Router {
+func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager, args ...any) chi.Router {
 	log = loggerOrDefault(log)
 	r := chi.NewRouter()
+	managed, deps, control := parseRouterArgs(args)
 	api := NewAPI(cfg, deps)
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(primaryLoopbackAuthMiddleware(managed))
 	r.Use(requestLogger(log, deps.Telemetry))
 	r.Use(recoverTelemetry(log, deps.Telemetry))
 	r.Use(corsMiddleware(cfg.AllowedOrigins))
@@ -61,7 +68,7 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r.NotFound(notFoundJSON)
 	r.MethodNotAllowed(methodNotAllowedJSON)
 
-	mountHealth(r, cfg)
+	mountHealth(r, cfg, managed)
 	mountTerminalMux(r, termMgr, log)
 	mountControl(r, control)
 	mountTelemetry(r, cfg, deps.Telemetry)
@@ -69,6 +76,22 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	api.Register(r)
 
 	return r
+}
+
+func parseRouterArgs(args []any) (*managedcontrol.Runtime, APIDeps, ControlDeps) {
+	switch len(args) {
+	case 2:
+		deps, _ := args[0].(APIDeps)
+		control, _ := args[1].(ControlDeps)
+		return nil, deps, control
+	case 3:
+		managed, _ := args[0].(*managedcontrol.Runtime)
+		deps, _ := args[1].(APIDeps)
+		control, _ := args[2].(ControlDeps)
+		return managed, deps, control
+	default:
+		panic("NewRouterWithControl expects (deps, control) or (managed, deps, control)")
+	}
 }
 
 func previewOriginMiddleware(sessions *controllers.SessionsController) func(http.Handler) http.Handler {
@@ -84,13 +107,13 @@ func previewOriginMiddleware(sessions *controllers.SessionsController) func(http
 
 // mountHealth registers the liveness and readiness probes the Electron
 // supervisor polls before letting the renderer connect.
-func mountHealth(r chi.Router, cfg config.Config) {
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		envelope.WriteJSON(w, http.StatusOK, daemonProbePayload("ok", cfg))
-	})
-	r.Get("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		envelope.WriteJSON(w, http.StatusOK, daemonProbePayload("ready", cfg))
-	})
+func mountHealth(r chi.Router, cfg config.Config, managed *managedcontrol.Runtime) {
+	healthz := daemonProbeHandler("ok", cfg, managed)
+	readyz := daemonProbeHandler("ready", cfg, managed)
+	r.Get("/healthz", healthz)
+	r.Head("/healthz", healthz)
+	r.Get("/readyz", readyz)
+	r.Head("/readyz", readyz)
 }
 
 // mountControl registers the loopback daemon-control endpoints. /shutdown is
@@ -305,12 +328,21 @@ func localControlRequest(r *http.Request) bool {
 // daemonProbePayload is shared by /healthz and /readyz. Dependency
 // initialization happens before the server is constructed, so a listening
 // daemon is ready to answer requests.
-func daemonProbePayload(status string, cfg config.Config) map[string]any {
+func daemonProbePayload(status string, cfg config.Config, managed *managedcontrol.Runtime) map[string]any {
+	attestation := daemonmeta.Current()
+	generation := ""
+	if managed != nil {
+		attestation = managed.Attestation()
+		generation = managed.Generation()
+	}
 	payload := map[string]any{
 		"status":      status,
 		"service":     daemonmeta.ServiceName,
 		"pid":         os.Getpid(),
-		"attestation": daemonmeta.Current(),
+		"attestation": attestation,
+	}
+	if generation != "" {
+		payload["generation"] = generation
 	}
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		payload["executablePath"] = exe
@@ -322,4 +354,150 @@ func daemonProbePayload(status string, cfg config.Config) map[string]any {
 		payload["startupWorkingDirectory"] = cfg.StartupWorkingDirectory
 	}
 	return payload
+}
+
+func daemonProbeHandler(status string, cfg config.Config, managed *managedcontrol.Runtime) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeProbeJSON(w, r, http.StatusOK, daemonProbePayload(status, cfg, managed))
+	}
+}
+
+func writeProbeJSON(w http.ResponseWriter, r *http.Request, status int, payload map[string]any) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		envelope.WriteJSON(w, status, payload)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(status)
+	if r != nil && r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write(body)
+}
+
+type transportScopeKey struct{}
+
+const (
+	daemonGenerationHeader = "X-AO-Daemon-Generation"
+	transportScopeLAN      = "lan"
+)
+
+var (
+	strictBearerHeaderPattern = regexp.MustCompile(`^Bearer ([0-9a-f]{64})$`)
+	strictGenerationPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+)
+
+func primaryLoopbackAuthMiddleware(managed *managedcontrol.Runtime) func(http.Handler) http.Handler {
+	if managed == nil {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if transportScope(r) == transportScopeLAN || isPublicManagedProbe(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			token, ok := strictBearerToken(r)
+			if !ok || hasAlternateCredentialCarrier(r) || !managed.MatchesBearerHex(token) {
+				envelope.WriteAPIError(w, r, http.StatusUnauthorized, "unauthorized", "BAD_BEARER",
+					"missing or invalid daemon bearer credential", nil)
+				return
+			}
+			generation, ok := strictSingleHeader(r, daemonGenerationHeader, validCanonicalGeneration)
+			if !ok || !managed.MatchesGeneration(generation) {
+				envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "STALE_DAEMON_CONTROL_GENERATION",
+					"daemon generation mismatch; refresh daemon identity", nil)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func isPublicManagedProbe(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if r.URL == nil || r.URL.RawPath != "" || r.URL.RawQuery != "" || r.URL.ForceQuery {
+		return false
+	}
+	switch r.URL.Path {
+	case "/healthz", "/readyz":
+		return true
+	default:
+		return false
+	}
+}
+
+func strictBearerToken(r *http.Request) (string, bool) {
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 {
+		return "", false
+	}
+	match := strictBearerHeaderPattern.FindStringSubmatch(strings.TrimSpace(values[0]))
+	if len(match) != 2 {
+		return "", false
+	}
+	return match[1], true
+}
+
+func strictSingleHeader(r *http.Request, key string, validator func(string) bool) (string, bool) {
+	values := r.Header.Values(key)
+	if len(values) != 1 {
+		return "", false
+	}
+	value := strings.TrimSpace(values[0])
+	if validator != nil && !validator(value) {
+		return "", false
+	}
+	return value, true
+}
+
+func validCanonicalGeneration(value string) bool {
+	return value != "" && strictGenerationPattern.MatchString(value)
+}
+
+func hasAlternateCredentialCarrier(r *http.Request) bool {
+	for key := range r.URL.Query() {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "access_token", "token", "authorization", "bearer":
+			return true
+		}
+	}
+	for _, key := range []string{"Proxy-Authorization", "X-Authorization", "X-AO-Authorization"} {
+		if len(r.Header.Values(key)) > 0 {
+			return true
+		}
+	}
+	for _, cookie := range r.Cookies() {
+		name := strings.ToLower(strings.TrimSpace(cookie.Name))
+		if name == "authorization" || name == "access_token" || name == "token" || name == "bearer" || name == strings.ToLower(authCookieName) {
+			return true
+		}
+	}
+	return false
+}
+
+func transportScope(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	scope, _ := r.Context().Value(transportScopeKey{}).(string)
+	return scope
+}
+
+func markTransportScope(scope string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		if transportScope(r) == scope {
+			next.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, transportScopeKey{}, scope)))
+	})
 }

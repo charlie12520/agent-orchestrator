@@ -22,18 +22,19 @@ const (
 
 	// Independently version every contract SuperOrch consumes. A protocol change
 	// must increment its own value instead of relying on the product version.
-	RESTAPIVersion                = 1
-	SSEEnvelopeVersion            = 1
-	TerminalMuxProtocolVersion    = 1
-	BrowserBridgeProtocolVersion  = 2
-	SessionControlVersion         = 1
-	PRControlVersion              = 1
-	OrchestratorControlVersion    = 1
-	DurableEventReplayVersion     = 0
-	DurableMutationJournalVersion = 0
-	GenerationFencingVersion      = 0
-	AuthenticatedIPCVersion       = 0
-	DatabaseSchemaVersion         = 38
+	RESTAPIVersion                 = 1
+	SSEEnvelopeVersion             = 1
+	TerminalMuxProtocolVersion     = 1
+	BrowserBridgeProtocolVersion   = 2
+	SessionControlVersion          = 1
+	PRControlVersion               = 1
+	OrchestratorControlVersion     = 1
+	DurableEventReplayVersion      = 0
+	DurableMutationJournalVersion  = 0
+	GenerationFencingVersion       = 0
+	DaemonControlGenerationVersion = 0
+	AuthenticatedIPCVersion        = 0
+	DatabaseSchemaVersion          = 38
 )
 
 // Build identity is overridden by the deterministic daemon build script using
@@ -60,18 +61,19 @@ type BuildIdentity struct {
 
 // ProtocolVersions fences independently evolving AO wire/storage contracts.
 type ProtocolVersions struct {
-	RESTAPI                int `json:"restApi"`
-	SSEEnvelope            int `json:"sseEnvelope"`
-	TerminalMux            int `json:"terminalMux"`
-	BrowserBridge          int `json:"browserBridge"`
-	SessionControl         int `json:"sessionControl"`
-	PRControl              int `json:"prControl"`
-	OrchestratorControl    int `json:"orchestratorControl"`
-	DurableEventReplay     int `json:"durableEventReplay"`
-	DurableMutationJournal int `json:"durableMutationJournal"`
-	GenerationFencing      int `json:"generationFencing"`
-	AuthenticatedIPC       int `json:"authenticatedIpc"`
-	DatabaseSchema         int `json:"databaseSchema"`
+	RESTAPI                 int `json:"restApi"`
+	SSEEnvelope             int `json:"sseEnvelope"`
+	TerminalMux             int `json:"terminalMux"`
+	BrowserBridge           int `json:"browserBridge"`
+	SessionControl          int `json:"sessionControl"`
+	PRControl               int `json:"prControl"`
+	OrchestratorControl     int `json:"orchestratorControl"`
+	DurableEventReplay      int `json:"durableEventReplay"`
+	DurableMutationJournal  int `json:"durableMutationJournal"`
+	GenerationFencing       int `json:"generationFencing"`
+	DaemonControlGeneration int `json:"daemonControlGeneration"`
+	AuthenticatedIPC        int `json:"authenticatedIpc"`
+	DatabaseSchema          int `json:"databaseSchema"`
 }
 
 // Attestation is the machine-readable compatibility contract emitted by the
@@ -102,18 +104,19 @@ func Current() Attestation {
 			Mode:    strings.TrimSpace(BuildMode),
 		},
 		Protocols: ProtocolVersions{
-			RESTAPI:                RESTAPIVersion,
-			SSEEnvelope:            SSEEnvelopeVersion,
-			TerminalMux:            TerminalMuxProtocolVersion,
-			BrowserBridge:          BrowserBridgeProtocolVersion,
-			SessionControl:         SessionControlVersion,
-			PRControl:              PRControlVersion,
-			OrchestratorControl:    OrchestratorControlVersion,
-			DurableEventReplay:     DurableEventReplayVersion,
-			DurableMutationJournal: DurableMutationJournalVersion,
-			GenerationFencing:      GenerationFencingVersion,
-			AuthenticatedIPC:       AuthenticatedIPCVersion,
-			DatabaseSchema:         DatabaseSchemaVersion,
+			RESTAPI:                 RESTAPIVersion,
+			SSEEnvelope:             SSEEnvelopeVersion,
+			TerminalMux:             TerminalMuxProtocolVersion,
+			BrowserBridge:           BrowserBridgeProtocolVersion,
+			SessionControl:          SessionControlVersion,
+			PRControl:               PRControlVersion,
+			OrchestratorControl:     OrchestratorControlVersion,
+			DurableEventReplay:      DurableEventReplayVersion,
+			DurableMutationJournal:  DurableMutationJournalVersion,
+			GenerationFencing:       GenerationFencingVersion,
+			DaemonControlGeneration: DaemonControlGenerationVersion,
+			AuthenticatedIPC:        AuthenticatedIPCVersion,
+			DatabaseSchema:          DatabaseSchemaVersion,
 		},
 		Capabilities: map[string]bool{
 			"authenticatedGuardian":      false,
@@ -122,6 +125,7 @@ func Current() Attestation {
 			"browserBridge":              true,
 			"browserControl":             true,
 			"buildAttestation":           true,
+			"daemonControlGeneration":    false,
 			"desktopAttachCompatibility": true,
 			"durableEventReplay":         false,
 			"durableMutationJournal":     false,
@@ -151,6 +155,28 @@ func Current() Attestation {
 			"terminalMux":                true,
 		},
 	}
+}
+
+// WithManagedControl overlays the runtime-only managed SuperOrch control
+// boundary on an attestation snapshot. Static build attestation remains false
+// for these capabilities; callers must opt into the overlay only after a valid
+// bootstrap has been read.
+func WithManagedControl(att Attestation) Attestation {
+	clone := att
+	clone.Protocols.AuthenticatedIPC = 1
+	clone.Protocols.DaemonControlGeneration = 1
+	clone.Capabilities = cloneCapabilities(att.Capabilities)
+	clone.Capabilities["authenticatedIpc"] = true
+	clone.Capabilities["daemonControlGeneration"] = true
+	return clone
+}
+
+func cloneCapabilities(src map[string]bool) map[string]bool {
+	dst := make(map[string]bool, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }
 
 var (
