@@ -304,8 +304,16 @@ func TestFullLifecycleSpawnToTermination(t *testing.T) {
 		t.Fatalf("timeline script failed: %v\n%s", err, out)
 	}
 	elapsed := time.Since(start)
-	if elapsed > 5*time.Second {
-		t.Fatalf("sped-up run took %v, want well under a second (speedup not applied?)", elapsed)
+	maxElapsed := 5 * time.Second
+	if runtime.GOOS == "windows" {
+		// Even with the phase sleeps collapsed to ~1ms, the six shimmed shell
+		// hook launches carry several seconds of fixed Git-for-Windows process
+		// startup overhead on some hosts. The speedup still applies; this budget
+		// just needs to tolerate the platform cost.
+		maxElapsed = 10 * time.Second
+	}
+	if elapsed > maxElapsed {
+		t.Fatalf("sped-up run took %v, want <= %v", elapsed, maxElapsed)
 	}
 
 	raw, err := os.ReadFile(hookLog) //nolint:gosec // path is under the test's own TempDir

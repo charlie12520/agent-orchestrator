@@ -310,13 +310,21 @@ func atMostOneArg(cmd *cobra.Command, args []string) error {
 }
 
 func newDaemonCommand() *cobra.Command {
-	return &cobra.Command{
+	var superorchManaged bool
+	cmd := &cobra.Command{
 		Use:    "daemon",
 		Short:  "Run the AO backend daemon",
 		Hidden: true,
 		Args:   noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return daemon.Run()
+			opts := daemon.RunOptions{}
+			if superorchManaged {
+				opts.ManagedBootstrap = cmd.InOrStdin()
+			}
+			return daemon.RunWithOptions(opts)
 		},
 	}
+	cmd.Flags().BoolVar(&superorchManaged, "superorch-managed", false, "Hidden: require SuperOrch bootstrap over stdin before serving")
+	_ = cmd.Flags().MarkHidden("superorch-managed")
+	return cmd
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
+	"github.com/aoagents/agent-orchestrator/backend/internal/managedcontrol"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
 )
@@ -21,10 +22,11 @@ import (
 // loopback port, publish the running.json handshake, serve until the context
 // is cancelled, then shut down gracefully and clean up the handshake file.
 type Server struct {
-	cfg    config.Config
-	log    *slog.Logger
-	http   *http.Server
-	listen net.Listener
+	cfg     config.Config
+	log     *slog.Logger
+	http    *http.Server
+	listen  net.Listener
+	managed *managedcontrol.Runtime
 
 	shutdownRequested chan struct{}
 	shutdownOnce      sync.Once
@@ -42,8 +44,9 @@ type Server struct {
 // supervisor stuck on "daemon not ready". The actual bound port is logged
 // ("daemon listening") and written to running.json, both of which the supervisor
 // reads, so the fallback propagates to the renderer with no UI changes.
-func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager, deps APIDeps) (*Server, error) {
+func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager, args ...any) (*Server, error) {
 	log = loggerOrDefault(log)
+	managed, deps := parseServerArgs(args)
 	ln, err := net.Listen("tcp", cfg.Addr())
 	if err != nil {
 		if !isAddrInUse(err) {
@@ -63,10 +66,11 @@ func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager,
 		cfg:               cfg,
 		log:               log,
 		listen:            ln,
+		managed:           managed,
 		shutdownRequested: make(chan struct{}),
 	}
 	srv.http = &http.Server{
-		Handler: NewRouterWithControl(cfg, log, termMgr, deps, ControlDeps{
+		Handler: NewRouterWithControl(cfg, log, termMgr, managed, deps, ControlDeps{
 			RequestShutdown: srv.requestShutdown,
 		}),
 		// ReadHeaderTimeout guards against slow-loris even on loopback;
@@ -74,6 +78,20 @@ func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return srv, nil
+}
+
+func parseServerArgs(args []any) (*managedcontrol.Runtime, APIDeps) {
+	switch len(args) {
+	case 1:
+		deps, _ := args[0].(APIDeps)
+		return nil, deps
+	case 2:
+		managed, _ := args[0].(*managedcontrol.Runtime)
+		deps, _ := args[1].(APIDeps)
+		return managed, deps
+	default:
+		panic("NewWithDeps expects (deps) or (managed, deps)")
+	}
 }
 
 // Addr returns the actual bound address (useful when the configured port was 0
@@ -91,6 +109,9 @@ func (s *Server) Handler() http.Handler { return s.http.Handler }
 // shutdown is complete.
 func (s *Server) Run(ctx context.Context) error {
 	attestation := daemonmeta.Current()
+	if s.managed != nil {
+		attestation = s.managed.Attestation()
+	}
 	info := runfile.Info{
 		PID:                   os.Getpid(),
 		Port:                  s.boundPort(),
