@@ -75,6 +75,28 @@ func (f *executionFault) Fail(_ context.Context, point executionjournal.FaultPoi
 	return f.err
 }
 
+type executionTerminalWriteStore struct {
+	executionjournal.Store
+	recordResult    func(context.Context, executionjournal.Completion, string, string) (executionjournal.Transition, error)
+	recordAmbiguous func(context.Context, executionjournal.Completion, string, string) (executionjournal.Transition, error)
+}
+
+type executionFinalizationContextKey struct{}
+
+func (s *executionTerminalWriteStore) RecordExecutionResult(ctx context.Context, completion executionjournal.Completion, owner, fence string) (executionjournal.Transition, error) {
+	if s.recordResult != nil {
+		return s.recordResult(ctx, completion, owner, fence)
+	}
+	return s.Store.RecordExecutionResult(ctx, completion, owner, fence)
+}
+
+func (s *executionTerminalWriteStore) RecordExecutionAmbiguous(ctx context.Context, completion executionjournal.Completion, owner, fence string) (executionjournal.Transition, error) {
+	if s.recordAmbiguous != nil {
+		return s.recordAmbiguous(ctx, completion, owner, fence)
+	}
+	return s.Store.RecordExecutionAmbiguous(ctx, completion, owner, fence)
+}
+
 func TestExecutionJournalExactRetryAndConflict(t *testing.T) {
 	store := newTestStore(t)
 	dispatcher := &executionDispatchFake{}
@@ -453,6 +475,211 @@ func TestExecutionJournalAmbiguityNeverRedispatchesAndCanRefine(t *testing.T) {
 	}
 }
 
+func TestExecutionJournalFinalizesAfterCallerCancellation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		dispatch  func(executionjournal.DispatchCommand) (executionjournal.DispatchReceipt, error)
+		wantState domain.ExecutionJournalState
+		wantBind  domain.ExecutionRunBindingState
+	}{
+		{
+			name: "dispatcher-error",
+			dispatch: func(executionjournal.DispatchCommand) (executionjournal.DispatchReceipt, error) {
+				return executionjournal.DispatchReceipt{}, context.Canceled
+			},
+			wantState: domain.ExecutionAmbiguous,
+			wantBind:  domain.ExecutionBindingAmbiguous,
+		},
+		{
+			name: "successful-receipt",
+			dispatch: func(command executionjournal.DispatchCommand) (executionjournal.DispatchReceipt, error) {
+				return executionReceipt(command), nil
+			},
+			wantState: domain.ExecutionResult,
+			wantBind:  domain.ExecutionBindingActive,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t)
+			const contextValue = "request-scope-value"
+			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), executionFinalizationContextKey{}, contextValue))
+			defer cancel()
+			observedFinalizationContext := false
+			checkFinalizationContext := func(ctx context.Context) error {
+				observedFinalizationContext = true
+				if err := ctx.Err(); err != nil {
+					return fmt.Errorf("finalization inherited caller cancellation: %w", err)
+				}
+				if value := ctx.Value(executionFinalizationContextKey{}); value != contextValue {
+					return fmt.Errorf("finalization lost caller context value: %v", value)
+				}
+				if _, ok := ctx.Deadline(); !ok {
+					return errors.New("finalization context has no service deadline")
+				}
+				return nil
+			}
+			finalizationStore := &executionTerminalWriteStore{Store: store}
+			finalizationStore.recordResult = func(ctx context.Context, completion executionjournal.Completion, owner, fence string) (executionjournal.Transition, error) {
+				if err := checkFinalizationContext(ctx); err != nil {
+					return executionjournal.Transition{}, err
+				}
+				return store.RecordExecutionResult(ctx, completion, owner, fence)
+			}
+			finalizationStore.recordAmbiguous = func(ctx context.Context, completion executionjournal.Completion, owner, fence string) (executionjournal.Transition, error) {
+				if err := checkFinalizationContext(ctx); err != nil {
+					return executionjournal.Transition{}, err
+				}
+				return store.RecordExecutionAmbiguous(ctx, completion, owner, fence)
+			}
+			dispatcher := &executionDispatchFake{handler: func(command executionjournal.DispatchCommand) (executionjournal.DispatchReceipt, error) {
+				cancel()
+				return test.dispatch(command)
+			}}
+			service := newExecutionServiceWithFinalizationTimeout(t, finalizationStore, dispatcher, "owner-cancel-"+test.name, 21, nil, time.Second)
+			raw := launchExecutionRequest("external-cancel-"+test.name, "launch-cancel-"+test.name, `{}`)
+
+			first, err := service.Execute(ctx, raw)
+			if err != nil || first.State != test.wantState || first.Replayed || dispatcher.count() != 1 {
+				t.Fatalf("first=%#v err=%v calls=%d", first, err, dispatcher.count())
+			}
+			if !errors.Is(ctx.Err(), context.Canceled) {
+				t.Fatalf("caller context error=%v, want canceled", ctx.Err())
+			}
+			if !observedFinalizationContext {
+				t.Fatal("terminal store did not observe a finalization context")
+			}
+			if test.wantState == domain.ExecutionAmbiguous {
+				assertExecutionPendingBindingState(t, store, "external-cancel-"+test.name, test.wantBind, 1)
+			} else {
+				assertExecutionBindingState(t, store, "external-cancel-"+test.name, test.wantBind, 1)
+			}
+
+			replay, err := service.Execute(context.Background(), raw)
+			if err != nil || replay.State != test.wantState || !replay.Replayed || !bytes.Equal(replay.ResultJSON, first.ResultJSON) || dispatcher.count() != 1 {
+				t.Fatalf("replay=%#v err=%v calls=%d", replay, err, dispatcher.count())
+			}
+		})
+	}
+}
+
+func TestExecutionJournalResultWriteUncertaintyClosesWithOwnerFence(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		postCommit bool
+		wantState  domain.ExecutionJournalState
+		wantBind   domain.ExecutionRunBindingState
+		wantReplay bool
+	}{
+		{name: "pre-commit-error", wantState: domain.ExecutionAmbiguous, wantBind: domain.ExecutionBindingAmbiguous},
+		{name: "post-commit-ack-lost", postCommit: true, wantState: domain.ExecutionResult, wantBind: domain.ExecutionBindingActive, wantReplay: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t)
+			resultCalls, ambiguityCalls := 0, 0
+			ackLost := errors.New("terminal write acknowledgement lost")
+			faultStore := &executionTerminalWriteStore{Store: store}
+			faultStore.recordResult = func(ctx context.Context, completion executionjournal.Completion, owner, fence string) (executionjournal.Transition, error) {
+				resultCalls++
+				if test.postCommit {
+					if _, err := store.RecordExecutionResult(ctx, completion, owner, fence); err != nil {
+						return executionjournal.Transition{}, err
+					}
+				}
+				return executionjournal.Transition{}, ackLost
+			}
+			faultStore.recordAmbiguous = func(ctx context.Context, completion executionjournal.Completion, owner, fence string) (executionjournal.Transition, error) {
+				ambiguityCalls++
+				return store.RecordExecutionAmbiguous(ctx, completion, owner, fence)
+			}
+			dispatcher := &executionDispatchFake{}
+			service := newExecutionServiceWithFinalizationTimeout(t, faultStore, dispatcher, "owner-uncertain-"+test.name, 22, nil, time.Second)
+			raw := launchExecutionRequest("external-uncertain-"+test.name, "launch-uncertain-"+test.name, `{}`)
+
+			first, err := service.Execute(context.Background(), raw)
+			if err != nil || first.State != test.wantState || first.Replayed != test.wantReplay || dispatcher.count() != 1 {
+				t.Fatalf("first=%#v err=%v calls=%d", first, err, dispatcher.count())
+			}
+			if resultCalls != 1 || ambiguityCalls != 1 {
+				t.Fatalf("terminal write calls: result=%d ambiguity=%d", resultCalls, ambiguityCalls)
+			}
+			if test.wantState == domain.ExecutionAmbiguous {
+				assertExecutionPendingBindingState(t, store, "external-uncertain-"+test.name, test.wantBind, 1)
+			} else {
+				assertExecutionBindingState(t, store, "external-uncertain-"+test.name, test.wantBind, 1)
+			}
+
+			replay, err := service.Execute(context.Background(), raw)
+			if err != nil || replay.State != test.wantState || !replay.Replayed || !bytes.Equal(replay.ResultJSON, first.ResultJSON) || dispatcher.count() != 1 {
+				t.Fatalf("replay=%#v err=%v calls=%d", replay, err, dispatcher.count())
+			}
+			if resultCalls != 1 || ambiguityCalls != 1 {
+				t.Fatalf("exact retry attempted terminal writes: result=%d ambiguity=%d", resultCalls, ambiguityCalls)
+			}
+		})
+	}
+}
+
+func TestExecutionJournalFinalizationTimeoutFailsClosed(t *testing.T) {
+	store := newTestStore(t)
+	resultCalls, ambiguityCalls := 0, 0
+	resultHadDeadline, ambiguityHadDeadline := false, false
+	blockUntilDeadline := func(ctx context.Context) error {
+		if _, ok := ctx.Deadline(); !ok {
+			return errors.New("finalization context has no deadline")
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("finalization context began canceled: %w", err)
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	faultStore := &executionTerminalWriteStore{Store: store}
+	faultStore.recordResult = func(ctx context.Context, _ executionjournal.Completion, _, _ string) (executionjournal.Transition, error) {
+		resultCalls++
+		_, resultHadDeadline = ctx.Deadline()
+		return executionjournal.Transition{}, blockUntilDeadline(ctx)
+	}
+	faultStore.recordAmbiguous = func(ctx context.Context, _ executionjournal.Completion, _, _ string) (executionjournal.Transition, error) {
+		ambiguityCalls++
+		_, ambiguityHadDeadline = ctx.Deadline()
+		return executionjournal.Transition{}, blockUntilDeadline(ctx)
+	}
+	dispatcher := &executionDispatchFake{}
+	service := newExecutionServiceWithFinalizationTimeout(t, faultStore, dispatcher, "owner-timeout-a", 23, nil, 20*time.Millisecond)
+	raw := launchExecutionRequest("external-timeout", "launch-timeout", `{}`)
+
+	started := time.Now()
+	_, err := service.Execute(context.Background(), raw)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("bounded finalization took %s", elapsed)
+	}
+	if code, reason, ok := executionjournal.ErrorInfo(err); !ok || code != executionjournal.CodeStorageFailure || reason != "record_result_and_ambiguity_failed" {
+		t.Fatalf("timeout error=%v code=%q reason=%q", err, code, reason)
+	}
+	if resultCalls != 1 || ambiguityCalls != 1 || dispatcher.count() != 1 {
+		t.Fatalf("calls: result=%d ambiguity=%d dispatch=%d", resultCalls, ambiguityCalls, dispatcher.count())
+	}
+	if !resultHadDeadline || !ambiguityHadDeadline {
+		t.Fatalf("service deadlines: result=%v ambiguity=%v", resultHadDeadline, ambiguityHadDeadline)
+	}
+	request, parseErr := executionjournal.ParseRequest(raw)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	journal, found, journalErr := store.GetExecutionOperation(context.Background(), request.OperationID)
+	if journalErr != nil || !found || journal.State != domain.ExecutionDispatched {
+		t.Fatalf("journal=%#v found=%v err=%v", journal, found, journalErr)
+	}
+	assertExecutionPendingBindingState(t, store, "external-timeout", domain.ExecutionBindingLaunching, 1)
+
+	if _, retryErr := service.Execute(context.Background(), raw); executionErrorCode(retryErr) != executionjournal.CodeReconciliationRequired || dispatcher.count() != 1 {
+		t.Fatalf("exact retry err=%v dispatch calls=%d", retryErr, dispatcher.count())
+	}
+	if _, refineErr := service.RefineExactResult(context.Background(), raw, executionjournal.DispatchReceipt{RunID: "ao-external-timeout", ResultJSON: []byte(`{"proof":"foreign"}`)}); executionErrorCode(refineErr) != executionjournal.CodeReconciliationRequired {
+		t.Fatalf("foreign refinement err=%v", refineErr)
+	}
+}
+
 func TestExecutionJournalConcurrentSQLiteStress(t *testing.T) {
 	storeA, storeB := newExecutionStorePair(t)
 	dispatcher := &executionDispatchFake{}
@@ -571,10 +798,15 @@ func mutationExecutionRequest(externalRunID, runID, operation, key string, gener
 
 func newExecutionService(t *testing.T, store executionjournal.Store, dispatcher executionjournal.Dispatcher, owner string, seed byte, faults executionjournal.FaultInjector) *executionjournal.Service {
 	t.Helper()
+	return newExecutionServiceWithFinalizationTimeout(t, store, dispatcher, owner, seed, faults, 0)
+}
+
+func newExecutionServiceWithFinalizationTimeout(t *testing.T, store executionjournal.Store, dispatcher executionjournal.Dispatcher, owner string, seed byte, faults executionjournal.FaultInjector, finalizationTimeout time.Duration) *executionjournal.Service {
+	t.Helper()
 	service, err := executionjournal.New(executionjournal.Deps{
 		Store: store, Dispatcher: dispatcher, DispatchOwner: owner,
 		Now:    func() time.Time { return time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC) },
-		Random: bytes.NewReader(bytes.Repeat([]byte{seed}, 4096)), Faults: faults,
+		Random: bytes.NewReader(bytes.Repeat([]byte{seed}, 4096)), Faults: faults, FinalizationTimeout: finalizationTimeout,
 	})
 	if err != nil {
 		t.Fatalf("new execution service: %v", err)
@@ -611,5 +843,13 @@ func assertExecutionBindingState(t *testing.T, store executionjournal.Store, ext
 	binding, found, err := store.GetExecutionRunBinding(context.Background(), externalRunID)
 	if err != nil || !found || binding.State != state || binding.ProcessGeneration != generation || binding.PendingOperationID != "" {
 		t.Fatalf("binding=%#v found=%v err=%v want state=%s generation=%d", binding, found, err, state, generation)
+	}
+}
+
+func assertExecutionPendingBindingState(t *testing.T, store executionjournal.Store, externalRunID string, state domain.ExecutionRunBindingState, generation int64) {
+	t.Helper()
+	binding, found, err := store.GetExecutionRunBinding(context.Background(), externalRunID)
+	if err != nil || !found || binding.State != state || binding.ProcessGeneration != generation || binding.PendingOperationID == "" {
+		t.Fatalf("binding=%#v found=%v err=%v want pending state=%s generation=%d", binding, found, err, state, generation)
 	}
 }

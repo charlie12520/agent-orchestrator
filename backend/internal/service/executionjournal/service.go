@@ -30,6 +30,8 @@ const (
 	CodeStorageFailure            ErrorCode = "storage_failure"
 )
 
+const defaultFinalizationTimeout = 5 * time.Second
+
 // OperationError never exposes dispatcher or storage details through Error().
 // Trusted callers may inspect the wrapped cause with errors.Unwrap.
 type OperationError struct {
@@ -185,18 +187,22 @@ type Deps struct {
 	Now           func() time.Time
 	Random        io.Reader
 	Faults        FaultInjector
+	// FinalizationTimeout bounds each service-owned terminal persistence
+	// attempt after Dispatcher may have crossed the side-effect boundary.
+	FinalizationTimeout time.Duration
 }
 
 // Service serializes mutations per external run in-process; SQLite binding CAS
 // provides the cross-process fence.
 type Service struct {
-	store         Store
-	dispatcher    Dispatcher
-	dispatchOwner string
-	now           func() time.Time
-	random        io.Reader
-	faults        FaultInjector
-	stripes       [64]sync.Mutex
+	store               Store
+	dispatcher          Dispatcher
+	dispatchOwner       string
+	now                 func() time.Time
+	random              io.Reader
+	faults              FaultInjector
+	finalizationTimeout time.Duration
+	stripes             [64]sync.Mutex
 }
 
 // New constructs an unwired execution-journal service.
@@ -210,13 +216,20 @@ func New(deps Deps) (*Service, error) {
 	if deps.Random == nil {
 		deps.Random = rand.Reader
 	}
+	if deps.FinalizationTimeout < 0 {
+		return nil, operationError(CodeNotConfigured, "finalization_timeout_must_not_be_negative", nil)
+	}
+	if deps.FinalizationTimeout == 0 {
+		deps.FinalizationTimeout = defaultFinalizationTimeout
+	}
 	return &Service{
-		store:         deps.Store,
-		dispatcher:    deps.Dispatcher,
-		dispatchOwner: deps.DispatchOwner,
-		now:           deps.Now,
-		random:        deps.Random,
-		faults:        deps.Faults,
+		store:               deps.Store,
+		dispatcher:          deps.Dispatcher,
+		dispatchOwner:       deps.DispatchOwner,
+		now:                 deps.Now,
+		random:              deps.Random,
+		faults:              deps.Faults,
+		finalizationTimeout: deps.FinalizationTimeout,
 	}, nil
 }
 
@@ -373,17 +386,33 @@ func (s *Service) dispatchAccepted(ctx context.Context, journal domain.Execution
 	if err != nil {
 		return s.recordOwnerAmbiguity(ctx, journal, fence)
 	}
-	completed, err := s.store.RecordExecutionResult(ctx, completion, s.dispatchOwner, fence)
+	finalizationCtx, cancel := s.finalizationContext(ctx)
+	completed, err := s.store.RecordExecutionResult(finalizationCtx, completion, s.dispatchOwner, fence)
+	cancel()
 	if err != nil {
-		return Result{}, operationError(CodeStorageFailure, "record_result_failed", err)
+		// The result write may have committed even though its acknowledgement was
+		// lost. A fresh, bounded owner-fenced ambiguity CAS safely distinguishes
+		// that case: an already durable result is replayed, otherwise the still-
+		// owned dispatch is made durably ambiguous.
+		recovered, ambiguityErr := s.recordOwnerAmbiguity(ctx, journal, fence)
+		if ambiguityErr != nil {
+			return Result{}, operationError(CodeStorageFailure, "record_result_and_ambiguity_failed", errors.Join(err, ambiguityErr))
+		}
+		return recovered, nil
 	}
-	if !completed.Changed {
-		return s.resumeJournal(ctx, completed.Journal, true)
-	}
-	if err := s.inject(ctx, FaultAfterResult); err != nil {
+	result, err := resultFromPostDispatchTransition(completed, !completed.Changed)
+	if err != nil {
 		return Result{}, err
 	}
-	return resultFromJournal(completed.Journal, false), nil
+	if completed.Changed {
+		if completed.Journal.State != domain.ExecutionResult {
+			return Result{}, operationError(CodeStorageFailure, "result_transition_not_durable", nil)
+		}
+		if err := s.inject(ctx, FaultAfterResult); err != nil {
+			return Result{}, err
+		}
+	}
+	return result, nil
 }
 
 func (s *Service) recordOwnerAmbiguity(ctx context.Context, journal domain.ExecutionOperationJournal, fence string) (Result, error) {
@@ -391,14 +420,34 @@ func (s *Service) recordOwnerAmbiguity(ctx context.Context, journal domain.Execu
 	if err != nil {
 		panic(err)
 	}
-	transition, err := s.store.RecordExecutionAmbiguous(ctx, Completion{
+	finalizationCtx, cancel := s.finalizationContext(ctx)
+	transition, err := s.store.RecordExecutionAmbiguous(finalizationCtx, Completion{
 		OperationID: journal.OperationID, ExternalRunID: journal.ExternalRunID,
 		ResultJSON: canonical, ResultHash: hash[:], CompletedAt: s.now().UTC(),
 	}, s.dispatchOwner, fence)
+	cancel()
 	if err != nil {
 		return Result{}, operationError(CodeStorageFailure, "record_ambiguity_failed", err)
 	}
-	return resultFromJournal(transition.Journal, !transition.Changed), nil
+	if transition.Changed && transition.Journal.State != domain.ExecutionAmbiguous {
+		return Result{}, operationError(CodeStorageFailure, "ambiguity_transition_not_durable", nil)
+	}
+	return resultFromPostDispatchTransition(transition, !transition.Changed)
+}
+
+func (s *Service) finalizationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), s.finalizationTimeout)
+}
+
+func resultFromPostDispatchTransition(transition Transition, replayed bool) (Result, error) {
+	switch transition.Journal.State {
+	case domain.ExecutionResult, domain.ExecutionAmbiguous:
+		return resultFromJournal(transition.Journal, replayed), nil
+	case domain.ExecutionDispatched:
+		return Result{}, operationError(CodeReconciliationRequired, "dispatched_operation_will_not_be_redispatched", nil)
+	default:
+		return Result{}, operationError(CodeStorageFailure, "invalid_post_dispatch_journal_state", nil)
+	}
 }
 
 func (s *Service) resumeJournal(ctx context.Context, journal domain.ExecutionOperationJournal, replayed bool) (Result, error) {
