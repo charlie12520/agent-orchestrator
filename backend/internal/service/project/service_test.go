@@ -725,7 +725,11 @@ func TestManager_InitializeRepositoryRecovery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("EvalSymlinks: %v", err)
 		}
-		if got := strings.TrimSpace(string(top)); got != want {
+		got, err := filepath.EvalSymlinks(filepath.Clean(strings.TrimSpace(string(top))))
+		if err != nil {
+			t.Fatalf("EvalSymlinks show-toplevel: %v", err)
+		}
+		if got != want {
 			t.Fatalf("show-toplevel = %q, want %q", got, want)
 		}
 	})
@@ -775,7 +779,11 @@ func TestManager_InitializeRepositoryRecovery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("EvalSymlinks: %v", err)
 		}
-		if got := strings.TrimSpace(string(top)); got != want {
+		got, err := filepath.EvalSymlinks(filepath.Clean(strings.TrimSpace(string(top))))
+		if err != nil {
+			t.Fatalf("EvalSymlinks show-toplevel: %v", err)
+		}
+		if got != want {
 			t.Fatalf("show-toplevel = %q, want %q", got, want)
 		}
 	})
