@@ -37,10 +37,14 @@ CREATE TABLE integration_merge_journal (
     state TEXT NOT NULL CHECK (state IN ('accepted', 'dispatched', 'result', 'ambiguous')),
     accepted_at TIMESTAMP NOT NULL,
     dispatched_at TIMESTAMP,
+    dispatch_owner TEXT CHECK (dispatch_owner IS NULL OR length(dispatch_owner) BETWEEN 8 AND 128),
+    dispatch_fence TEXT CHECK (dispatch_fence IS NULL OR length(dispatch_fence) BETWEEN 16 AND 64),
     completed_at TIMESTAMP,
     outcome_json TEXT CHECK (outcome_json IS NULL OR length(outcome_json) BETWEEN 2 AND 131072),
     CHECK (state NOT IN ('dispatched', 'ambiguous') OR dispatched_at IS NOT NULL),
     CHECK (state != 'accepted' OR dispatched_at IS NULL),
+    CHECK ((dispatch_owner IS NULL) = (dispatch_fence IS NULL)),
+    CHECK ((dispatched_at IS NULL) = (dispatch_owner IS NULL)),
     CHECK ((state IN ('result', 'ambiguous')) = (completed_at IS NOT NULL)),
     CHECK ((state IN ('result', 'ambiguous')) = (outcome_json IS NOT NULL))
 );

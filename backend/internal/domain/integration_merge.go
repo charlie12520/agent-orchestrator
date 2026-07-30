@@ -163,6 +163,8 @@ type IntegrationMergeJournal struct {
 	State          IntegrationMergeJournalState
 	AcceptedAt     time.Time
 	DispatchedAt   time.Time
+	DispatchOwner  string
+	DispatchFence  string
 	CompletedAt    time.Time
 	Outcome        *IntegrationMergeOutcome
 }

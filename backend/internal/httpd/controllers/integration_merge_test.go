@@ -18,6 +18,8 @@ import (
 )
 
 type fakeIntegrationMergeManager struct {
+	issueCalls int
+	mergeCalls int
 	issueInput integrationmerge.IssueLeaseInput
 	mergeInput integrationmerge.MergeInput
 	revokeID   string
@@ -30,6 +32,7 @@ type fakeIntegrationMergeManager struct {
 }
 
 func (f *fakeIntegrationMergeManager) IssueLease(_ context.Context, in integrationmerge.IssueLeaseInput) (integrationmerge.IssuedLease, error) {
+	f.issueCalls++
 	f.issueInput = in
 	return f.issued, f.issueErr
 }
@@ -40,6 +43,7 @@ func (f *fakeIntegrationMergeManager) RevokeLease(_ context.Context, id string) 
 }
 
 func (f *fakeIntegrationMergeManager) Merge(_ context.Context, in integrationmerge.MergeInput) (domain.IntegrationMergeOutcome, error) {
+	f.mergeCalls++
 	f.mergeInput = in
 	return f.outcome, f.mergeErr
 }
@@ -160,5 +164,87 @@ func TestIntegrationMergeControllerBoundsAndSafeErrors(t *testing.T) {
 	assertErrorCode(t, body, status, http.StatusUnprocessableEntity, "REVALIDATION_REQUIRED")
 	if !strings.Contains(string(body), `"reason":"merge_conflict"`) || strings.Contains(string(body), "never-print-this-secret") {
 		t.Fatalf("unsafe revalidation body: %s", body)
+	}
+
+	manager.mergeErr = &integrationmerge.OperationError{Code: integrationmerge.CodeReconciliationInProgress, Reason: "dispatch_reconciliation_in_progress"}
+	body, status, _ = doRequest(t, srv, http.MethodPost, "/api/v1/integration/merges", `{"integrationLease":"iml_valid-shape-001","gateCapability":"never-print-this-secret","idempotencyKey":"operation-01","manualApproval":false}`)
+	assertErrorCode(t, body, status, http.StatusConflict, "RECONCILIATION_IN_PROGRESS")
+	if strings.Contains(string(body), "never-print-this-secret") {
+		t.Fatalf("secret reflected in reconciliation response: %s", body)
+	}
+}
+
+func TestIntegrationMergeControllerRejectsDuplicateAndMalformedJSONBeforeBinding(t *testing.T) {
+	manager := &fakeIntegrationMergeManager{}
+	srv := integrationMergeServer(t, manager)
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "top-level duplicate",
+			path: "/api/v1/integration/merges",
+			body: `{"integrationLease":"iml_first-valid-shape","integrationLease":"iml_second-valid-shape","gateCapability":"secret-value","idempotencyKey":"operation-01"}`,
+		},
+		{
+			name: "case-folded duplicate",
+			path: "/api/v1/integration/merges",
+			body: `{"integrationLease":"iml_first-valid-shape","IntegrationLease":"iml_second-valid-shape","gateCapability":"secret-value","idempotencyKey":"operation-01"}`,
+		},
+		{
+			name: "escaped duplicate",
+			path: "/api/v1/integration/merges",
+			body: `{"integrationLease":"iml_first-valid-shape","integrationLeas\u0065":"iml_second-valid-shape","gateCapability":"secret-value","idempotencyKey":"operation-01"}`,
+		},
+		{
+			name: "nested check-policy duplicate",
+			path: "/api/v1/integration/merge-leases",
+			body: `{"checkPolicy":{"revision":"checks-v1","revision":"checks-v2"}}`,
+		},
+		{
+			name: "nested review-policy duplicate",
+			path: "/api/v1/integration/merge-leases",
+			body: `{"reviewPolicy":{"requiredApprovals":1,"requiredApprovals":2}}`,
+		},
+		{
+			name: "trailing value",
+			path: "/api/v1/integration/merges",
+			body: `{ } { }`,
+		},
+		{
+			name: "wrong field type",
+			path: "/api/v1/integration/merges",
+			body: `{"integrationLease":"iml_valid-shape-001","gateCapability":"secret-value","idempotencyKey":"operation-01","manualApproval":"false"}`,
+		},
+		{
+			name: "null body",
+			path: "/api/v1/integration/merges",
+			body: `null`,
+		},
+		{
+			name: "array body",
+			path: "/api/v1/integration/merges",
+			body: `[]`,
+		},
+		{
+			name: "unknown field",
+			path: "/api/v1/integration/merges",
+			body: `{"integrationLease":"iml_valid-shape-001","gateCapability":"secret-value","idempotencyKey":"operation-01","unknown":true}`,
+		},
+		{
+			name: "excessive nesting",
+			path: "/api/v1/integration/merges",
+			body: `{"unknown":` + strings.Repeat("[", 34) + "0" + strings.Repeat("]", 34) + "}",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body, status, _ := doRequest(t, srv, http.MethodPost, tc.path, tc.body)
+			assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_JSON")
+		})
+	}
+	if manager.issueCalls != 0 || manager.mergeCalls != 0 {
+		t.Fatalf("malformed JSON reached manager: issue=%d merge=%d", manager.issueCalls, manager.mergeCalls)
 	}
 }

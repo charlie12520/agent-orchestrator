@@ -17,6 +17,15 @@ type allowRoot struct{ err error }
 
 func (a allowRoot) AuthorizeRoot(context.Context) error { return a.err }
 
+type fixedOwnerVerifier struct {
+	liveness DispatchOwnerLiveness
+	err      error
+}
+
+func (v fixedOwnerVerifier) VerifyDispatchOwner(context.Context, string) (DispatchOwnerLiveness, error) {
+	return v.liveness, v.err
+}
+
 type fakeStore struct {
 	lease          domain.IntegrationMergeLease
 	journal        domain.IntegrationMergeJournal
@@ -76,7 +85,7 @@ func (f *fakeStore) AcceptIntegrationMerge(_ context.Context, journal domain.Int
 	return true, f.lease.Status, nil
 }
 
-func (f *fakeStore) MarkIntegrationMergeDispatched(_ context.Context, key string, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+func (f *fakeStore) MarkIntegrationMergeDispatched(_ context.Context, key, owner, fence string, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
 	if f.journal.IdempotencyKey != key {
 		return domain.IntegrationMergeJournal{}, false, errors.New("missing journal")
 	}
@@ -85,15 +94,33 @@ func (f *fakeStore) MarkIntegrationMergeDispatched(_ context.Context, key string
 	}
 	f.journal.State = domain.IntegrationMergeDispatched
 	f.journal.DispatchedAt = at
+	f.journal.DispatchOwner = owner
+	f.journal.DispatchFence = fence
 	return cloneJournal(f.journal), true, nil
 }
 
-func (f *fakeStore) RecordIntegrationMergeResult(_ context.Context, key string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
-	if f.failResultOnce {
-		f.failResultOnce = false
-		return domain.IntegrationMergeJournal{}, false, errors.New("injected database failure")
+func (f *fakeStore) ConfirmIntegrationMergeDispatch(_ context.Context, key, owner, fence string) (domain.IntegrationMergeJournal, bool, error) {
+	if f.journal.IdempotencyKey != key {
+		return domain.IntegrationMergeJournal{}, false, errors.New("missing journal")
 	}
-	if f.journal.IdempotencyKey != key || (f.journal.State != domain.IntegrationMergeAccepted && f.journal.State != domain.IntegrationMergeDispatched) {
+	ok := f.journal.State == domain.IntegrationMergeDispatched && f.journal.DispatchOwner == owner && f.journal.DispatchFence == fence
+	return cloneJournal(f.journal), ok, nil
+}
+
+func (f *fakeStore) RecordIntegrationMergePreDispatchResult(_ context.Context, key string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+	return f.recordResult(key, "", "", outcome, at, false)
+}
+
+func (f *fakeStore) RecordIntegrationMergeFencedResult(_ context.Context, key, owner, fence string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+	return f.recordResult(key, owner, fence, outcome, at, true)
+}
+
+func (f *fakeStore) RecordIntegrationMergeReconciledResult(_ context.Context, key string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+	return f.recordResult(key, "", "", outcome, at, true)
+}
+
+func (f *fakeStore) RecordIntegrationMergeRefinedResult(_ context.Context, key string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+	if f.journal.IdempotencyKey != key || f.journal.State != domain.IntegrationMergeAmbiguous {
 		return cloneJournal(f.journal), false, nil
 	}
 	f.journal.State = domain.IntegrationMergeResult
@@ -103,8 +130,26 @@ func (f *fakeStore) RecordIntegrationMergeResult(_ context.Context, key string, 
 	return cloneJournal(f.journal), true, nil
 }
 
-func (f *fakeStore) RecordIntegrationMergeAmbiguous(_ context.Context, key string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
-	if f.journal.IdempotencyKey != key || f.journal.State != domain.IntegrationMergeDispatched {
+func (f *fakeStore) recordResult(key, owner, fence string, outcome domain.IntegrationMergeOutcome, at time.Time, dispatched bool) (domain.IntegrationMergeJournal, bool, error) {
+	if f.failResultOnce {
+		f.failResultOnce = false
+		return domain.IntegrationMergeJournal{}, false, errors.New("injected database failure")
+	}
+	if f.journal.IdempotencyKey != key || (dispatched && f.journal.State != domain.IntegrationMergeDispatched) || (!dispatched && f.journal.State != domain.IntegrationMergeAccepted) {
+		return cloneJournal(f.journal), false, nil
+	}
+	if owner != "" && (f.journal.DispatchOwner != owner || f.journal.DispatchFence != fence) {
+		return cloneJournal(f.journal), false, nil
+	}
+	f.journal.State = domain.IntegrationMergeResult
+	f.journal.CompletedAt = at
+	copy := cloneOutcome(outcome)
+	f.journal.Outcome = &copy
+	return cloneJournal(f.journal), true, nil
+}
+
+func (f *fakeStore) RecordIntegrationMergeFencedAmbiguous(_ context.Context, key, owner, fence string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+	if f.journal.IdempotencyKey != key || f.journal.State != domain.IntegrationMergeDispatched || f.journal.DispatchOwner != owner || f.journal.DispatchFence != fence {
 		return cloneJournal(f.journal), false, nil
 	}
 	f.journal.State = domain.IntegrationMergeAmbiguous
@@ -294,7 +339,7 @@ func TestCrashAndReconciliationNeverRedispatch(t *testing.T) {
 		if err != nil || !accepted {
 			t.Fatalf("accept=%v err=%v", accepted, err)
 		}
-		restarted := mustService(t, store, broker, &now, nil)
+		restarted := mustServiceWithOwner(t, store, broker, &now, nil, "dispatch-owner-restarted", fixedOwnerVerifier{liveness: DispatchOwnerDead})
 		out, err := restarted.Merge(context.Background(), in)
 		if err != nil || out.Status != domain.IntegrationMergeOutcomeMerged || broker.mergeCalls != 1 {
 			t.Fatalf("out=%#v err=%v calls=%d", out, err, broker.mergeCalls)
@@ -312,7 +357,7 @@ func TestCrashAndReconciliationNeverRedispatch(t *testing.T) {
 		if store.journal.State != domain.IntegrationMergeDispatched || broker.mergeCalls != 0 {
 			t.Fatalf("journal=%s calls=%d", store.journal.State, broker.mergeCalls)
 		}
-		restarted := mustService(t, store, broker, &now, nil)
+		restarted := mustServiceWithOwner(t, store, broker, &now, nil, "dispatch-owner-crash-recovery", fixedOwnerVerifier{liveness: DispatchOwnerDead})
 		out, err := restarted.Merge(context.Background(), in)
 		if err != nil || out.Status != domain.IntegrationMergeOutcomeAmbiguous || broker.mergeCalls != 0 {
 			t.Fatalf("out=%#v err=%v calls=%d", out, err, broker.mergeCalls)
@@ -383,7 +428,7 @@ func TestReconciliationRequiresExactAuthorizedOperation(t *testing.T) {
 			if accepted, _, err := store.AcceptIntegrationMerge(context.Background(), journal, now); err != nil || !accepted {
 				t.Fatalf("accept=%v err=%v", accepted, err)
 			}
-			if _, changed, err := store.MarkIntegrationMergeDispatched(context.Background(), in.IdempotencyKey, now.Add(time.Second)); err != nil || !changed {
+			if _, changed, err := store.MarkIntegrationMergeDispatched(context.Background(), in.IdempotencyKey, "dispatch-owner-primary", "imf_abcdefghijklmnop", now.Add(time.Second)); err != nil || !changed {
 				t.Fatalf("dispatch=%v err=%v", changed, err)
 			}
 			broker.candidate.Merged = true
@@ -393,7 +438,7 @@ func TestReconciliationRequiresExactAuthorizedOperation(t *testing.T) {
 			broker.candidate.MergedAt = now.Add(2 * time.Second)
 			tc.mutate(&broker.candidate)
 
-			restarted := mustService(t, store, broker, &now, nil)
+			restarted := mustServiceWithOwner(t, store, broker, &now, nil, "dispatch-owner-reconcile", fixedOwnerVerifier{liveness: DispatchOwnerDead})
 			out, err := restarted.Merge(context.Background(), in)
 			if err != nil || out.Status != domain.IntegrationMergeOutcomeAmbiguous || broker.mergeCalls != 0 {
 				t.Fatalf("out=%#v err=%v calls=%d", out, err, broker.mergeCalls)
@@ -406,12 +451,26 @@ func TestRootAuthorizationAndConstructionAreFailClosed(t *testing.T) {
 	if _, err := New(Deps{}); err == nil {
 		t.Fatal("New without managed control and broker succeeded")
 	} else {
-		assertCodeReason(t, err, CodeNotConfigured, "managed_control_and_merge_broker_required")
+		assertCodeReason(t, err, CodeNotConfigured, "managed_control_merge_broker_and_dispatch_fence_required")
 	}
 	store := &fakeStore{}
 	broker := &fakeBroker{candidate: validCandidate()}
 	now := testNow
-	svc, err := New(Deps{Store: store, Broker: broker, RootAuthorizer: allowRoot{err: errors.New("denied")}, Now: func() time.Time { return now }})
+	if _, err := New(Deps{Store: store, Broker: broker, RootAuthorizer: allowRoot{}, DispatchOwner: "dispatch-owner-without-verifier"}); err == nil {
+		t.Fatal("New without trusted dispatch owner verifier succeeded")
+	} else {
+		assertCodeReason(t, err, CodeNotConfigured, "managed_control_merge_broker_and_dispatch_fence_required")
+	}
+	if _, err := New(Deps{Store: store, Broker: broker, RootAuthorizer: allowRoot{}, DispatchOwner: "short", OwnerVerifier: fixedOwnerVerifier{}}); err == nil {
+		t.Fatal("New with an invalid dispatch owner succeeded")
+	} else {
+		assertCodeReason(t, err, CodeNotConfigured, "managed_control_merge_broker_and_dispatch_fence_required")
+	}
+	svc, err := New(Deps{
+		Store: store, Broker: broker, RootAuthorizer: allowRoot{err: errors.New("denied")},
+		DispatchOwner: "dispatch-owner-denied", OwnerVerifier: fixedOwnerVerifier{liveness: DispatchOwnerAlive},
+		Now: func() time.Time { return now },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,11 +501,17 @@ func newTestServiceAt(t *testing.T, now *time.Time, faults FaultInjector, mutate
 }
 
 func mustService(t *testing.T, store Store, broker Broker, now *time.Time, faults FaultInjector) *Service {
+	return mustServiceWithOwner(t, store, broker, now, faults, "dispatch-owner-primary", fixedOwnerVerifier{liveness: DispatchOwnerAlive})
+}
+
+func mustServiceWithOwner(t *testing.T, store Store, broker Broker, now *time.Time, faults FaultInjector, owner string, verifier DispatchOwnerVerifier) *Service {
 	t.Helper()
 	svc, err := New(Deps{
 		Store: store, Broker: broker, RootAuthorizer: allowRoot{},
+		DispatchOwner: owner, OwnerVerifier: verifier,
 		Now:    func() time.Time { return now.UTC() },
 		Random: bytes.NewReader(bytes.Repeat([]byte{7}, 256)), Faults: faults,
+		ReconcileTimeout: 25 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)

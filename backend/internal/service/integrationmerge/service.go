@@ -28,32 +28,34 @@ import (
 
 const (
 	// ContractVersion independently versions the hardened merge contract.
-	ContractVersion = 1
-	defaultLeaseTTL = 5 * time.Minute
-	maxLeaseTTL     = 15 * time.Minute
-	maxEvidence     = 200
-	maxPolicyItems  = 100
-	maxBodyString   = 512
+	ContractVersion            = 1
+	defaultLeaseTTL            = 5 * time.Minute
+	maxLeaseTTL                = 15 * time.Minute
+	maxEvidence                = 200
+	maxPolicyItems             = 100
+	maxBodyString              = 512
+	reconciliationPollInterval = 100 * time.Millisecond
 )
 
 // ErrorCode is a stable, non-secret service failure classification.
 type ErrorCode string
 
 const (
-	CodeInvalidInput           ErrorCode = "invalid_input"
-	CodeUnauthorized           ErrorCode = "unauthorized"
-	CodeNotConfigured          ErrorCode = "not_configured"
-	CodeLeaseNotFound          ErrorCode = "lease_not_found"
-	CodeActiveLeaseExists      ErrorCode = "active_lease_exists"
-	CodeLeaseConsumed          ErrorCode = "lease_consumed"
-	CodeLeaseRevoked           ErrorCode = "lease_revoked"
-	CodeLeaseExpired           ErrorCode = "lease_expired"
-	CodeCapabilityRejected     ErrorCode = "capability_rejected"
-	CodeIdempotencyConflict    ErrorCode = "idempotency_conflict"
-	CodeManualApprovalRequired ErrorCode = "manual_approval_required"
-	CodeRevalidationRequired   ErrorCode = "revalidation_required"
-	CodeBrokerUnavailable      ErrorCode = "broker_unavailable"
-	CodeInternal               ErrorCode = "internal"
+	CodeInvalidInput             ErrorCode = "invalid_input"
+	CodeUnauthorized             ErrorCode = "unauthorized"
+	CodeNotConfigured            ErrorCode = "not_configured"
+	CodeLeaseNotFound            ErrorCode = "lease_not_found"
+	CodeActiveLeaseExists        ErrorCode = "active_lease_exists"
+	CodeLeaseConsumed            ErrorCode = "lease_consumed"
+	CodeLeaseRevoked             ErrorCode = "lease_revoked"
+	CodeLeaseExpired             ErrorCode = "lease_expired"
+	CodeCapabilityRejected       ErrorCode = "capability_rejected"
+	CodeIdempotencyConflict      ErrorCode = "idempotency_conflict"
+	CodeManualApprovalRequired   ErrorCode = "manual_approval_required"
+	CodeRevalidationRequired     ErrorCode = "revalidation_required"
+	CodeReconciliationInProgress ErrorCode = "reconciliation_in_progress"
+	CodeBrokerUnavailable        ErrorCode = "broker_unavailable"
+	CodeInternal                 ErrorCode = "internal"
 )
 
 // OperationError intentionally exposes only bounded code/reason fields. The
@@ -101,6 +103,23 @@ type RootAuthorizer interface {
 	AuthorizeRoot(context.Context) error
 }
 
+// DispatchOwnerLiveness is a trustworthy, non-timeout proof about the
+// process/generation that owns one durable dispatch fence.
+type DispatchOwnerLiveness string
+
+const (
+	DispatchOwnerAlive   DispatchOwnerLiveness = "alive"
+	DispatchOwnerDead    DispatchOwnerLiveness = "dead"
+	DispatchOwnerUnknown DispatchOwnerLiveness = "unknown"
+)
+
+// DispatchOwnerVerifier is supplied by the managed supervisor boundary. A
+// timeout alone must never be interpreted as owner death: only Dead is proof
+// that no paused invocation can resume.
+type DispatchOwnerVerifier interface {
+	VerifyDispatchOwner(context.Context, string) (DispatchOwnerLiveness, error)
+}
+
 // Broker is the only outbound merge authority. A production implementation
 // must be a separate least-privilege MergeBroker/GitHub App client.
 type Broker interface {
@@ -125,9 +144,13 @@ type Store interface {
 	RevokeIntegrationMergeLease(context.Context, string, time.Time) (domain.IntegrationMergeLease, bool, error)
 	GetIntegrationMergeJournal(context.Context, string) (domain.IntegrationMergeJournal, bool, error)
 	AcceptIntegrationMerge(context.Context, domain.IntegrationMergeJournal, time.Time) (bool, domain.IntegrationMergeLeaseStatus, error)
-	MarkIntegrationMergeDispatched(context.Context, string, time.Time) (domain.IntegrationMergeJournal, bool, error)
-	RecordIntegrationMergeResult(context.Context, string, domain.IntegrationMergeOutcome, time.Time) (domain.IntegrationMergeJournal, bool, error)
-	RecordIntegrationMergeAmbiguous(context.Context, string, domain.IntegrationMergeOutcome, time.Time) (domain.IntegrationMergeJournal, bool, error)
+	MarkIntegrationMergeDispatched(context.Context, string, string, string, time.Time) (domain.IntegrationMergeJournal, bool, error)
+	ConfirmIntegrationMergeDispatch(context.Context, string, string, string) (domain.IntegrationMergeJournal, bool, error)
+	RecordIntegrationMergePreDispatchResult(context.Context, string, domain.IntegrationMergeOutcome, time.Time) (domain.IntegrationMergeJournal, bool, error)
+	RecordIntegrationMergeFencedResult(context.Context, string, string, string, domain.IntegrationMergeOutcome, time.Time) (domain.IntegrationMergeJournal, bool, error)
+	RecordIntegrationMergeReconciledResult(context.Context, string, domain.IntegrationMergeOutcome, time.Time) (domain.IntegrationMergeJournal, bool, error)
+	RecordIntegrationMergeRefinedResult(context.Context, string, domain.IntegrationMergeOutcome, time.Time) (domain.IntegrationMergeJournal, bool, error)
+	RecordIntegrationMergeFencedAmbiguous(context.Context, string, string, string, domain.IntegrationMergeOutcome, time.Time) (domain.IntegrationMergeJournal, bool, error)
 }
 
 // FaultInjector exists only to test crash boundaries. Production wiring should
@@ -137,12 +160,15 @@ type FaultInjector interface {
 	AfterBrokerMerge(context.Context, domain.IntegrationBrokerMergeResult) error
 }
 
-// Deps are mandatory construction dependencies. Requiring both the managed
-// authorizer and broker prevents accidentally enabling only half the boundary.
+// Deps are mandatory construction dependencies. DispatchOwner must uniquely
+// identify this Service instance/process generation; OwnerVerifier is the
+// managed supervisor's non-timeout liveness authority for other owners.
 type Deps struct {
 	Store            Store
 	Broker           Broker
 	RootAuthorizer   RootAuthorizer
+	DispatchOwner    string
+	OwnerVerifier    DispatchOwnerVerifier
 	Now              func() time.Time
 	Random           io.Reader
 	ReconcileTimeout time.Duration
@@ -155,18 +181,22 @@ type Service struct {
 	store          Store
 	broker         Broker
 	authorizer     RootAuthorizer
+	dispatchOwner  string
+	ownerVerifier  DispatchOwnerVerifier
 	now            func() time.Time
 	random         io.Reader
 	reconcileLimit time.Duration
 	faults         FaultInjector
 	gate           sync.Mutex
+	ownedFences    map[string]string
 }
 
-// New constructs the merge actor. Production must not call New until both a
-// managed root authorizer and a separate least-privilege broker are available.
+// New constructs the merge actor. Production must not call New until a managed
+// root authorizer, separate least-privilege broker, unique dispatch owner, and
+// trustworthy owner verifier are all available.
 func New(d Deps) (*Service, error) {
-	if d.Store == nil || d.Broker == nil || d.RootAuthorizer == nil {
-		return nil, opError(CodeNotConfigured, "managed_control_and_merge_broker_required", nil)
+	if d.Store == nil || d.Broker == nil || d.RootAuthorizer == nil || d.OwnerVerifier == nil || !validDispatchOwner(d.DispatchOwner) {
+		return nil, opError(CodeNotConfigured, "managed_control_merge_broker_and_dispatch_fence_required", nil)
 	}
 	if d.Now == nil {
 		d.Now = time.Now
@@ -181,10 +211,13 @@ func New(d Deps) (*Service, error) {
 		store:          d.Store,
 		broker:         d.Broker,
 		authorizer:     d.RootAuthorizer,
+		dispatchOwner:  d.DispatchOwner,
+		ownerVerifier:  d.OwnerVerifier,
 		now:            d.Now,
 		random:         d.Random,
 		reconcileLimit: d.ReconcileTimeout,
 		faults:         d.Faults,
+		ownedFences:    make(map[string]string),
 	}, nil
 }
 
@@ -365,18 +398,35 @@ func (s *Service) Merge(ctx context.Context, in MergeInput) (domain.IntegrationM
 	if !accepted {
 		return domain.IntegrationMergeOutcome{}, leaseStateError(state)
 	}
-	return s.dispatchAccepted(ctx, lease, journal, candidate)
+	return s.dispatchAccepted(ctx, lease, journal)
 }
 
 func (s *Service) resumeJournal(ctx context.Context, lease domain.IntegrationMergeLease, journal domain.IntegrationMergeJournal) (domain.IntegrationMergeOutcome, error) {
 	switch journal.State {
-	case domain.IntegrationMergeResult, domain.IntegrationMergeAmbiguous:
+	case domain.IntegrationMergeResult:
 		if journal.Outcome == nil {
 			return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "terminal_journal_missing_outcome", nil)
 		}
+		delete(s.ownedFences, journal.IdempotencyKey)
+		return cloneOutcome(*journal.Outcome), nil
+	case domain.IntegrationMergeAmbiguous:
+		if journal.Outcome == nil {
+			return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "terminal_journal_missing_outcome", nil)
+		}
+		// Ambiguity is terminal for dispatch: it can never cause another
+		// Broker.Merge. A later authoritative exact-success observation may,
+		// however, refine the durable record to the operation's true result.
+		refineCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.reconcileLimit)
+		candidate, err := s.broker.Candidate(refineCtx, lease.Repository, lease.PRNumber)
+		cancel()
+		if err == nil && mergedOperationProven(lease, candidate) {
+			outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeMerged, "", candidate.MergeCommitSHA, candidate.MergedAt)
+			return s.recordRefinedResult(ctx, journal.IdempotencyKey, outcome)
+		}
+		delete(s.ownedFences, journal.IdempotencyKey)
 		return cloneOutcome(*journal.Outcome), nil
 	case domain.IntegrationMergeDispatched:
-		return s.reconcile(ctx, lease, journal, "restart_or_response_loss")
+		return s.reconcileDispatched(ctx, lease, journal)
 	case domain.IntegrationMergeAccepted:
 		candidate, err := s.broker.Candidate(ctx, lease.Repository, lease.PRNumber)
 		if err != nil {
@@ -384,27 +434,29 @@ func (s *Service) resumeJournal(ctx context.Context, lease domain.IntegrationMer
 		}
 		if reason := candidateRevalidationReason(lease, candidate); reason != "" {
 			outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeRevalidationRequired, reason, "", s.now().UTC())
-			return s.recordResult(ctx, journal.IdempotencyKey, outcome)
+			return s.recordPreDispatchResult(ctx, journal.IdempotencyKey, outcome)
 		}
-		return s.dispatchAccepted(ctx, lease, journal, candidate)
+		return s.dispatchAccepted(ctx, lease, journal)
 	default:
 		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "invalid_journal_state", nil)
 	}
 }
 
-func (s *Service) dispatchAccepted(ctx context.Context, lease domain.IntegrationMergeLease, journal domain.IntegrationMergeJournal, candidate domain.IntegrationMergeCandidate) (domain.IntegrationMergeOutcome, error) {
+func (s *Service) dispatchAccepted(ctx context.Context, lease domain.IntegrationMergeLease, journal domain.IntegrationMergeJournal) (domain.IntegrationMergeOutcome, error) {
+	fence, err := randomToken(s.random, "imf_", 18)
+	if err != nil {
+		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "dispatch_fence_randomness_failed", err)
+	}
 	dispatchedAt := s.now().UTC()
-	updated, changed, err := s.store.MarkIntegrationMergeDispatched(ctx, journal.IdempotencyKey, dispatchedAt)
+	updated, changed, err := s.store.MarkIntegrationMergeDispatched(ctx, journal.IdempotencyKey, s.dispatchOwner, fence, dispatchedAt)
 	if err != nil {
 		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "dispatch_persistence_failed", err)
 	}
 	if !changed {
-		if updated.State == domain.IntegrationMergeDispatched {
-			return s.reconcile(ctx, lease, updated, "concurrent_dispatch")
-		}
 		return s.resumeJournal(ctx, lease, updated)
 	}
 	journal = updated
+	s.ownedFences[journal.IdempotencyKey] = journal.DispatchFence
 
 	if s.faults != nil {
 		if err := s.faults.BeforeBrokerMerge(ctx); err != nil {
@@ -414,6 +466,43 @@ func (s *Service) dispatchAccepted(ctx context.Context, lease domain.Integration
 			return domain.IntegrationMergeOutcome{}, err
 		}
 	}
+
+	// Re-read authoritative facts after the durable dispatch and any pause. A
+	// candidate change fences the journal before the external call.
+	candidate, err := s.broker.Candidate(ctx, lease.Repository, lease.PRNumber)
+	if err != nil {
+		outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeAmbiguous, "authoritative_pre_dispatch_revalidation_unavailable", "", s.now().UTC())
+		return s.recordFencedAmbiguous(ctx, journal, outcome)
+	}
+	if mergedOperationProven(lease, candidate) {
+		outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeMerged, "", candidate.MergeCommitSHA, candidate.MergedAt)
+		return s.recordReconciledResult(ctx, journal.IdempotencyKey, outcome)
+	}
+	if candidate.Merged || candidate.Ambiguous {
+		outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeAmbiguous, "authorized_merge_not_proven", "", s.now().UTC())
+		return s.recordFencedAmbiguous(ctx, journal, outcome)
+	}
+	if reason := candidateRevalidationReason(lease, candidate); reason != "" {
+		outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeRevalidationRequired, reason, "", s.now().UTC())
+		return s.recordFencedResult(ctx, journal, outcome)
+	}
+
+	// This owner/fence check is the final durable operation before Broker.Merge.
+	// Foreign services may reconcile success but cannot invalidate a live owner,
+	// so a paused owner cannot resume after its fence was terminalized.
+	confirmed, ownsFence, err := s.store.ConfirmIntegrationMergeDispatch(ctx, journal.IdempotencyKey, journal.DispatchOwner, journal.DispatchFence)
+	if err != nil {
+		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "dispatch_fence_confirmation_failed", err)
+	}
+	if !ownsFence {
+		outcome, transitionErr := terminalOrInProgress(confirmed, "dispatch_fence_lost")
+		if transitionErr == nil {
+			delete(s.ownedFences, journal.IdempotencyKey)
+		}
+		return outcome, transitionErr
+	}
+	journal = confirmed
+
 	receipt, mergeErr := s.broker.Merge(ctx, BrokerMergeCommand{
 		Repository:      lease.Repository,
 		PRNumber:        lease.PRNumber,
@@ -426,60 +515,186 @@ func (s *Service) dispatchAccepted(ctx context.Context, lease domain.Integration
 		}
 	}
 	if mergeErr != nil || !validReceipt(lease, receipt) {
-		return s.reconcile(ctx, lease, journal, "merge_response_uncertain")
+		return s.reconcileDispatched(ctx, lease, journal)
 	}
 	outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeMerged, "", receipt.MergeCommitSHA, receipt.MergedAt)
-	return s.recordResult(ctx, journal.IdempotencyKey, outcome)
+	return s.recordFencedResult(ctx, journal, outcome)
 }
 
-// reconcile never calls Broker.Merge. It returns success only when the fresh
-// authoritative facts prove the exact authorized operation occurred.
-func (s *Service) reconcile(ctx context.Context, lease domain.IntegrationMergeLease, journal domain.IntegrationMergeJournal, reason string) (domain.IntegrationMergeOutcome, error) {
+// reconcileDispatched never calls Broker.Merge. Exact authoritative success is
+// the only terminal result a foreign owner may write while the recorded owner
+// could still be alive. An eligible, unmerged candidate remains dispatched
+// unless trusted managed control proves that owner dead.
+func (s *Service) reconcileDispatched(ctx context.Context, lease domain.IntegrationMergeLease, journal domain.IntegrationMergeJournal) (domain.IntegrationMergeOutcome, error) {
+	if !validDispatchFence(journal.DispatchOwner, journal.DispatchFence) {
+		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "invalid_dispatch_fence", nil)
+	}
 	reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.reconcileLimit)
 	defer cancel()
 	candidate, err := s.broker.Candidate(reconcileCtx, lease.Repository, lease.PRNumber)
 	if err == nil && mergedOperationProven(lease, candidate) {
 		outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeMerged, "", candidate.MergeCommitSHA, candidate.MergedAt)
-		return s.recordResult(reconcileCtx, journal.IdempotencyKey, outcome)
+		return s.recordReconciledResult(reconcileCtx, journal.IdempotencyKey, outcome)
 	}
+
+	// Re-entering this same Service is safe because its process-local gate is
+	// held: any prior Broker.Merge invocation by this owner has returned. A
+	// foreign owner requires an affirmative non-timeout death proof before any
+	// non-success terminal write, even when its candidate read looks invalid;
+	// otherwise it could race the live owner's already-confirmed broker call.
+	ownerMayTerminalize := s.locallyOwnsDispatchFence(journal)
+	if !ownerMayTerminalize {
+		liveness, verifyErr := s.ownerVerifier.VerifyDispatchOwner(reconcileCtx, journal.DispatchOwner)
+		ownerMayTerminalize = verifyErr == nil && liveness == DispatchOwnerDead
+	}
+	if !ownerMayTerminalize {
+		return domain.IntegrationMergeOutcome{}, opError(CodeReconciliationInProgress, "dispatch_reconciliation_in_progress", nil)
+	}
+
+	// Once the merge call has returned uncertain, the authoritative read model
+	// can lag the accepted side effect. Poll only after local ownership or
+	// trusted owner-death proof; this never dispatches and keeps a live foreign
+	// owner's retry responsive. Exact success wins as soon as it is visible.
+	candidate, err = s.settleDispatchedCandidate(reconcileCtx, lease, candidate, err)
+	if err == nil && mergedOperationProven(lease, candidate) {
+		outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeMerged, "", candidate.MergeCommitSHA, candidate.MergedAt)
+		return s.recordReconciledResult(reconcileCtx, journal.IdempotencyKey, outcome)
+	}
+	if err == nil && (candidate.Merged || candidate.Ambiguous) {
+		outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeAmbiguous, "authorized_merge_not_proven", "", s.now().UTC())
+		return s.recordFencedAmbiguous(reconcileCtx, journal, outcome)
+	}
+	if err == nil {
+		if candidateReason := candidateRevalidationReason(lease, candidate); candidateReason != "" {
+			outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeRevalidationRequired, candidateReason, "", s.now().UTC())
+			return s.recordFencedResult(reconcileCtx, journal, outcome)
+		}
+	}
+	reason := "authorized_merge_not_proven"
 	if err != nil {
 		reason = "authoritative_reconciliation_unavailable"
-	} else {
-		reason = "authorized_merge_not_proven"
 	}
 	outcome := outcomeFromCandidate(lease, journal, candidate, domain.IntegrationMergeOutcomeAmbiguous, reason, "", s.now().UTC())
-	return s.recordAmbiguous(reconcileCtx, journal.IdempotencyKey, outcome)
+	return s.recordFencedAmbiguous(reconcileCtx, journal, outcome)
 }
 
-func (s *Service) recordResult(ctx context.Context, key string, outcome domain.IntegrationMergeOutcome) (domain.IntegrationMergeOutcome, error) {
+func (s *Service) settleDispatchedCandidate(ctx context.Context, lease domain.IntegrationMergeLease, candidate domain.IntegrationMergeCandidate, candidateErr error) (domain.IntegrationMergeCandidate, error) {
+	if candidateErr == nil && mergedOperationProven(lease, candidate) {
+		return candidate, nil
+	}
+	timer := time.NewTimer(reconciliationPollInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return candidate, candidateErr
+		case <-timer.C:
+			candidate, candidateErr = s.broker.Candidate(ctx, lease.Repository, lease.PRNumber)
+			if candidateErr == nil && mergedOperationProven(lease, candidate) {
+				return candidate, nil
+			}
+			timer.Reset(reconciliationPollInterval)
+		}
+	}
+}
+
+func (s *Service) recordPreDispatchResult(ctx context.Context, key string, outcome domain.IntegrationMergeOutcome) (domain.IntegrationMergeOutcome, error) {
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.reconcileLimit)
 	defer cancel()
-	journal, ok, err := s.store.RecordIntegrationMergeResult(persistCtx, key, outcome, outcome.CompletedAt)
+	journal, ok, err := s.store.RecordIntegrationMergePreDispatchResult(persistCtx, key, outcome, outcome.CompletedAt)
 	if err != nil {
 		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "result_persistence_failed", err)
 	}
-	if !ok || journal.Outcome == nil {
-		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "result_transition_rejected", nil)
-	}
-	return cloneOutcome(*journal.Outcome), nil
+	return persistedOutcome(journal, ok, "result_transition_rejected")
 }
 
-func (s *Service) recordAmbiguous(ctx context.Context, key string, outcome domain.IntegrationMergeOutcome) (domain.IntegrationMergeOutcome, error) {
+func (s *Service) recordFencedResult(ctx context.Context, journal domain.IntegrationMergeJournal, outcome domain.IntegrationMergeOutcome) (domain.IntegrationMergeOutcome, error) {
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.reconcileLimit)
 	defer cancel()
-	journal, ok, err := s.store.RecordIntegrationMergeAmbiguous(persistCtx, key, outcome, outcome.CompletedAt)
+	stored, ok, err := s.store.RecordIntegrationMergeFencedResult(persistCtx, journal.IdempotencyKey, journal.DispatchOwner, journal.DispatchFence, outcome, outcome.CompletedAt)
+	if err != nil {
+		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "result_persistence_failed", err)
+	}
+	result, resultErr := persistedOutcome(stored, ok, "result_transition_rejected")
+	if resultErr == nil {
+		delete(s.ownedFences, journal.IdempotencyKey)
+	}
+	return result, resultErr
+}
+
+func (s *Service) recordReconciledResult(ctx context.Context, key string, outcome domain.IntegrationMergeOutcome) (domain.IntegrationMergeOutcome, error) {
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.reconcileLimit)
+	defer cancel()
+	journal, ok, err := s.store.RecordIntegrationMergeReconciledResult(persistCtx, key, outcome, outcome.CompletedAt)
+	if err != nil {
+		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "result_persistence_failed", err)
+	}
+	result, resultErr := persistedOutcome(journal, ok, "result_transition_rejected")
+	if resultErr == nil {
+		delete(s.ownedFences, key)
+	}
+	return result, resultErr
+}
+
+func (s *Service) recordRefinedResult(ctx context.Context, key string, outcome domain.IntegrationMergeOutcome) (domain.IntegrationMergeOutcome, error) {
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.reconcileLimit)
+	defer cancel()
+	journal, ok, err := s.store.RecordIntegrationMergeRefinedResult(persistCtx, key, outcome, outcome.CompletedAt)
+	if err != nil {
+		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "result_persistence_failed", err)
+	}
+	result, resultErr := persistedOutcome(journal, ok, "result_refinement_rejected")
+	if resultErr == nil {
+		delete(s.ownedFences, key)
+	}
+	return result, resultErr
+}
+
+func (s *Service) recordFencedAmbiguous(ctx context.Context, journal domain.IntegrationMergeJournal, outcome domain.IntegrationMergeOutcome) (domain.IntegrationMergeOutcome, error) {
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.reconcileLimit)
+	defer cancel()
+	stored, ok, err := s.store.RecordIntegrationMergeFencedAmbiguous(persistCtx, journal.IdempotencyKey, journal.DispatchOwner, journal.DispatchFence, outcome, outcome.CompletedAt)
 	if err != nil {
 		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "ambiguity_persistence_failed", err)
 	}
-	if !ok || journal.Outcome == nil {
-		return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "ambiguity_transition_rejected", nil)
+	result, resultErr := persistedOutcome(stored, ok, "ambiguity_transition_rejected")
+	if resultErr == nil {
+		delete(s.ownedFences, journal.IdempotencyKey)
 	}
-	return cloneOutcome(*journal.Outcome), nil
+	return result, resultErr
+}
+
+func (s *Service) locallyOwnsDispatchFence(journal domain.IntegrationMergeJournal) bool {
+	if journal.DispatchOwner != s.dispatchOwner {
+		return false
+	}
+	fence, ok := s.ownedFences[journal.IdempotencyKey]
+	return ok && subtle.ConstantTimeCompare([]byte(fence), []byte(journal.DispatchFence)) == 1
+}
+
+func persistedOutcome(journal domain.IntegrationMergeJournal, changed bool, rejectedReason string) (domain.IntegrationMergeOutcome, error) {
+	if journal.Outcome != nil && (journal.State == domain.IntegrationMergeResult || journal.State == domain.IntegrationMergeAmbiguous) {
+		return cloneOutcome(*journal.Outcome), nil
+	}
+	if !changed && journal.State == domain.IntegrationMergeDispatched {
+		return domain.IntegrationMergeOutcome{}, opError(CodeReconciliationInProgress, "dispatch_reconciliation_in_progress", nil)
+	}
+	return domain.IntegrationMergeOutcome{}, opError(CodeInternal, rejectedReason, nil)
+}
+
+func terminalOrInProgress(journal domain.IntegrationMergeJournal, reason string) (domain.IntegrationMergeOutcome, error) {
+	if journal.Outcome != nil && (journal.State == domain.IntegrationMergeResult || journal.State == domain.IntegrationMergeAmbiguous) {
+		return cloneOutcome(*journal.Outcome), nil
+	}
+	if journal.State == domain.IntegrationMergeDispatched {
+		return domain.IntegrationMergeOutcome{}, opError(CodeReconciliationInProgress, reason, nil)
+	}
+	return domain.IntegrationMergeOutcome{}, opError(CodeInternal, "dispatch_fence_transition_rejected", nil)
 }
 
 func (s *Service) authorize(ctx context.Context) error {
-	if s == nil || s.authorizer == nil || s.broker == nil || s.store == nil {
-		return opError(CodeNotConfigured, "managed_control_and_merge_broker_required", nil)
+	if s == nil || s.authorizer == nil || s.broker == nil || s.store == nil || s.ownerVerifier == nil || !validDispatchOwner(s.dispatchOwner) {
+		return opError(CodeNotConfigured, "managed_control_merge_broker_and_dispatch_fence_required", nil)
 	}
 	if err := s.authorizer.AuthorizeRoot(ctx); err != nil {
 		return opError(CodeUnauthorized, "root_authentication_required", err)
@@ -922,6 +1137,14 @@ func validBranch(branch string) bool {
 	return true
 }
 
+func validDispatchOwner(owner string) bool {
+	return len(owner) >= 8 && len(owner) <= 128 && dispatchOwnerPattern.MatchString(owner)
+}
+
+func validDispatchFence(owner, fence string) bool {
+	return validDispatchOwner(owner) && len(fence) >= 16 && len(fence) <= 64 && dispatchFencePattern.MatchString(fence)
+}
+
 func leaseStateError(status domain.IntegrationMergeLeaseStatus) error {
 	switch status {
 	case domain.IntegrationMergeLeaseConsumed:
@@ -936,9 +1159,11 @@ func leaseStateError(status domain.IntegrationMergeLeaseStatus) error {
 }
 
 var (
-	repoPartPattern    = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
-	leaseIDPattern     = regexp.MustCompile(`^iml_[A-Za-z0-9_-]+$`)
-	idempotencyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
+	repoPartPattern      = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
+	leaseIDPattern       = regexp.MustCompile(`^iml_[A-Za-z0-9_-]+$`)
+	idempotencyPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
+	dispatchOwnerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
+	dispatchFencePattern = regexp.MustCompile(`^imf_[A-Za-z0-9_-]+$`)
 )
 
 // Keep fmt referenced in builds where error wrapping gets optimized away by

@@ -167,42 +167,106 @@ func (s *Store) AcceptIntegrationMerge(ctx context.Context, journal domain.Integ
 	return accepted, status, err
 }
 
-func (s *Store) MarkIntegrationMergeDispatched(ctx context.Context, key string, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+func (s *Store) MarkIntegrationMergeDispatched(ctx context.Context, key, owner, fence string, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return s.transitionIntegrationMergeJournal(ctx, "mark integration merge dispatched", key, func(q *gen.Queries) (int64, error) {
 		return q.MarkIntegrationMergeDispatched(ctx, gen.MarkIntegrationMergeDispatchedParams{
-			DispatchedAt: optionalTime(at), IdempotencyKey: key,
+			DispatchedAt: optionalTime(at), DispatchOwner: optionalString(owner),
+			DispatchFence: optionalString(fence), IdempotencyKey: key,
 		})
 	})
 }
 
-func (s *Store) RecordIntegrationMergeResult(ctx context.Context, key string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
-	encoded, err := json.Marshal(outcome)
+// ConfirmIntegrationMergeDispatch atomically proves that the caller still
+// owns the exact durable dispatch fence immediately before the broker call.
+func (s *Store) ConfirmIntegrationMergeDispatch(ctx context.Context, key, owner, fence string) (domain.IntegrationMergeJournal, bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.transitionIntegrationMergeJournal(ctx, "confirm integration merge dispatch", key, func(q *gen.Queries) (int64, error) {
+		return q.ConfirmIntegrationMergeDispatch(ctx, gen.ConfirmIntegrationMergeDispatchParams{
+			IdempotencyKey: key, DispatchOwner: optionalString(owner), DispatchFence: optionalString(fence),
+		})
+	})
+}
+
+func (s *Store) RecordIntegrationMergePreDispatchResult(ctx context.Context, key string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+	encoded, err := marshalIntegrationMergeOutcome(outcome)
 	if err != nil {
-		return domain.IntegrationMergeJournal{}, false, fmt.Errorf("encode integration merge result: %w", err)
+		return domain.IntegrationMergeJournal{}, false, err
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.transitionIntegrationMergeJournal(ctx, "record integration merge result", key, func(q *gen.Queries) (int64, error) {
-		return q.RecordIntegrationMergeResult(ctx, gen.RecordIntegrationMergeResultParams{
-			CompletedAt: optionalTime(at), OutcomeJson: sql.NullString{String: string(encoded), Valid: true},
+	return s.transitionIntegrationMergeJournal(ctx, "record integration merge pre-dispatch result", key, func(q *gen.Queries) (int64, error) {
+		return q.RecordIntegrationMergePreDispatchResult(ctx, gen.RecordIntegrationMergePreDispatchResultParams{
+			CompletedAt: optionalTime(at), OutcomeJson: encoded,
 			IdempotencyKey: key,
 		})
 	})
 }
 
-func (s *Store) RecordIntegrationMergeAmbiguous(ctx context.Context, key string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
-	encoded, err := json.Marshal(outcome)
+// RecordIntegrationMergeFencedResult terminalizes only the exact recorded
+// dispatch owner/fence. It is used both by the owner and by a reconciler that
+// is fencing an authoritatively invalid candidate.
+func (s *Store) RecordIntegrationMergeFencedResult(ctx context.Context, key, owner, fence string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+	encoded, err := marshalIntegrationMergeOutcome(outcome)
 	if err != nil {
-		return domain.IntegrationMergeJournal{}, false, fmt.Errorf("encode integration merge ambiguity: %w", err)
+		return domain.IntegrationMergeJournal{}, false, err
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.transitionIntegrationMergeJournal(ctx, "record integration merge ambiguity", key, func(q *gen.Queries) (int64, error) {
-		return q.RecordIntegrationMergeAmbiguous(ctx, gen.RecordIntegrationMergeAmbiguousParams{
-			CompletedAt: optionalTime(at), OutcomeJson: sql.NullString{String: string(encoded), Valid: true},
-			IdempotencyKey: key,
+	return s.transitionIntegrationMergeJournal(ctx, "record integration merge fenced result", key, func(q *gen.Queries) (int64, error) {
+		return q.RecordIntegrationMergeFencedResult(ctx, gen.RecordIntegrationMergeFencedResultParams{
+			CompletedAt: optionalTime(at), OutcomeJson: encoded, IdempotencyKey: key,
+			DispatchOwner: optionalString(owner), DispatchFence: optionalString(fence),
+		})
+	})
+}
+
+// RecordIntegrationMergeReconciledResult permits a non-owner to persist only
+// the exact success proven by fresh authoritative broker facts.
+func (s *Store) RecordIntegrationMergeReconciledResult(ctx context.Context, key string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+	encoded, err := marshalIntegrationMergeOutcome(outcome)
+	if err != nil {
+		return domain.IntegrationMergeJournal{}, false, err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.transitionIntegrationMergeJournal(ctx, "record integration merge reconciled result", key, func(q *gen.Queries) (int64, error) {
+		return q.RecordIntegrationMergeReconciledResult(ctx, gen.RecordIntegrationMergeReconciledResultParams{
+			CompletedAt: optionalTime(at), OutcomeJson: encoded, IdempotencyKey: key,
+		})
+	})
+}
+
+// RecordIntegrationMergeRefinedResult upgrades a durable ambiguity only after
+// the service has obtained fresh authoritative proof of the exact operation.
+// It cannot reopen dispatch or cause another broker call.
+func (s *Store) RecordIntegrationMergeRefinedResult(ctx context.Context, key string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+	encoded, err := marshalIntegrationMergeOutcome(outcome)
+	if err != nil {
+		return domain.IntegrationMergeJournal{}, false, err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.transitionIntegrationMergeJournal(ctx, "record integration merge refined result", key, func(q *gen.Queries) (int64, error) {
+		return q.RecordIntegrationMergeRefinedResult(ctx, gen.RecordIntegrationMergeRefinedResultParams{
+			CompletedAt: optionalTime(at), OutcomeJson: encoded, IdempotencyKey: key,
+		})
+	})
+}
+
+func (s *Store) RecordIntegrationMergeFencedAmbiguous(ctx context.Context, key, owner, fence string, outcome domain.IntegrationMergeOutcome, at time.Time) (domain.IntegrationMergeJournal, bool, error) {
+	encoded, err := marshalIntegrationMergeOutcome(outcome)
+	if err != nil {
+		return domain.IntegrationMergeJournal{}, false, err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.transitionIntegrationMergeJournal(ctx, "record integration merge fenced ambiguity", key, func(q *gen.Queries) (int64, error) {
+		return q.RecordIntegrationMergeFencedAmbiguous(ctx, gen.RecordIntegrationMergeFencedAmbiguousParams{
+			CompletedAt: optionalTime(at), OutcomeJson: encoded, IdempotencyKey: key,
+			DispatchOwner: optionalString(owner), DispatchFence: optionalString(fence),
 		})
 	})
 }
@@ -246,6 +310,14 @@ func marshalIntegrationPolicies(lease domain.IntegrationMergeLease) (string, str
 	return string(checks), string(reviews), nil
 }
 
+func marshalIntegrationMergeOutcome(outcome domain.IntegrationMergeOutcome) (sql.NullString, error) {
+	encoded, err := json.Marshal(outcome)
+	if err != nil {
+		return sql.NullString{}, fmt.Errorf("encode integration merge outcome: %w", err)
+	}
+	return sql.NullString{String: string(encoded), Valid: true}, nil
+}
+
 func integrationMergeLeaseFromGen(row gen.IntegrationMergeLease) (domain.IntegrationMergeLease, error) {
 	var checks domain.IntegrationCheckPolicy
 	if err := json.Unmarshal([]byte(row.CheckPolicyJson), &checks); err != nil {
@@ -274,6 +346,7 @@ func integrationMergeJournalFromGen(row gen.IntegrationMergeJournal) (domain.Int
 		IdempotencyKey: row.IdempotencyKey, RequestHash: append([]byte(nil), row.RequestHash...),
 		LeaseID: row.LeaseID, State: domain.IntegrationMergeJournalState(row.State),
 		AcceptedAt: row.AcceptedAt, DispatchedAt: timeFromNull(row.DispatchedAt),
+		DispatchOwner: stringFromNull(row.DispatchOwner), DispatchFence: stringFromNull(row.DispatchFence),
 		CompletedAt: timeFromNull(row.CompletedAt),
 	}
 	if row.OutcomeJson.Valid {
@@ -288,4 +361,15 @@ func integrationMergeJournalFromGen(row gen.IntegrationMergeJournal) (domain.Int
 
 func optionalTime(value time.Time) sql.NullTime {
 	return sql.NullTime{Time: value, Valid: !value.IsZero()}
+}
+
+func optionalString(value string) sql.NullString {
+	return sql.NullString{String: value, Valid: value != ""}
+}
+
+func stringFromNull(value sql.NullString) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.String
 }

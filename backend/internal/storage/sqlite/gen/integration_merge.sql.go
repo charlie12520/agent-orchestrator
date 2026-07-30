@@ -11,6 +11,27 @@ import (
 	"time"
 )
 
+const confirmIntegrationMergeDispatch = `-- name: ConfirmIntegrationMergeDispatch :execrows
+UPDATE integration_merge_journal
+SET dispatch_fence = dispatch_fence
+WHERE idempotency_key = ? AND state = 'dispatched'
+    AND dispatch_owner = ? AND dispatch_fence = ?
+`
+
+type ConfirmIntegrationMergeDispatchParams struct {
+	IdempotencyKey string
+	DispatchOwner  sql.NullString
+	DispatchFence  sql.NullString
+}
+
+func (q *Queries) ConfirmIntegrationMergeDispatch(ctx context.Context, arg ConfirmIntegrationMergeDispatchParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, confirmIntegrationMergeDispatch, arg.IdempotencyKey, arg.DispatchOwner, arg.DispatchFence)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const consumeIntegrationMergeLease = `-- name: ConsumeIntegrationMergeLease :execrows
 UPDATE integration_merge_leases
 SET status = 'consumed', consumed_at = ?
@@ -58,7 +79,7 @@ func (q *Queries) ExpireIntegrationMergeLeases(ctx context.Context, expiresAt ti
 
 const getIntegrationMergeJournal = `-- name: GetIntegrationMergeJournal :one
 SELECT idempotency_key, request_hash, lease_id, state, accepted_at,
-    dispatched_at, completed_at, outcome_json
+    dispatched_at, dispatch_owner, dispatch_fence, completed_at, outcome_json
 FROM integration_merge_journal
 WHERE idempotency_key = ?
 `
@@ -73,6 +94,8 @@ func (q *Queries) GetIntegrationMergeJournal(ctx context.Context, idempotencyKey
 		&i.State,
 		&i.AcceptedAt,
 		&i.DispatchedAt,
+		&i.DispatchOwner,
+		&i.DispatchFence,
 		&i.CompletedAt,
 		&i.OutcomeJson,
 	)
@@ -117,8 +140,8 @@ func (q *Queries) GetIntegrationMergeLease(ctx context.Context, id string) (Inte
 const insertIntegrationMergeJournal = `-- name: InsertIntegrationMergeJournal :exec
 INSERT INTO integration_merge_journal (
     idempotency_key, request_hash, lease_id, state, accepted_at,
-    dispatched_at, completed_at, outcome_json
-) VALUES (?, ?, ?, 'accepted', ?, NULL, NULL, NULL)
+    dispatched_at, dispatch_owner, dispatch_fence, completed_at, outcome_json
+) VALUES (?, ?, ?, 'accepted', ?, NULL, NULL, NULL, NULL, NULL)
 `
 
 type InsertIntegrationMergeJournalParams struct {
@@ -194,57 +217,142 @@ func (q *Queries) InsertIntegrationMergeLease(ctx context.Context, arg InsertInt
 
 const markIntegrationMergeDispatched = `-- name: MarkIntegrationMergeDispatched :execrows
 UPDATE integration_merge_journal
-SET state = 'dispatched', dispatched_at = ?
+SET state = 'dispatched', dispatched_at = ?, dispatch_owner = ?, dispatch_fence = ?
 WHERE idempotency_key = ? AND state = 'accepted'
 `
 
 type MarkIntegrationMergeDispatchedParams struct {
 	DispatchedAt   sql.NullTime
+	DispatchOwner  sql.NullString
+	DispatchFence  sql.NullString
 	IdempotencyKey string
 }
 
 func (q *Queries) MarkIntegrationMergeDispatched(ctx context.Context, arg MarkIntegrationMergeDispatchedParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, markIntegrationMergeDispatched, arg.DispatchedAt, arg.IdempotencyKey)
+	result, err := q.db.ExecContext(ctx, markIntegrationMergeDispatched,
+		arg.DispatchedAt,
+		arg.DispatchOwner,
+		arg.DispatchFence,
+		arg.IdempotencyKey,
+	)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
 }
 
-const recordIntegrationMergeAmbiguous = `-- name: RecordIntegrationMergeAmbiguous :execrows
+const recordIntegrationMergeFencedAmbiguous = `-- name: RecordIntegrationMergeFencedAmbiguous :execrows
 UPDATE integration_merge_journal
 SET state = 'ambiguous', completed_at = ?, outcome_json = ?
 WHERE idempotency_key = ? AND state = 'dispatched'
+    AND dispatch_owner = ? AND dispatch_fence = ?
 `
 
-type RecordIntegrationMergeAmbiguousParams struct {
+type RecordIntegrationMergeFencedAmbiguousParams struct {
 	CompletedAt    sql.NullTime
 	OutcomeJson    sql.NullString
 	IdempotencyKey string
+	DispatchOwner  sql.NullString
+	DispatchFence  sql.NullString
 }
 
-func (q *Queries) RecordIntegrationMergeAmbiguous(ctx context.Context, arg RecordIntegrationMergeAmbiguousParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, recordIntegrationMergeAmbiguous, arg.CompletedAt, arg.OutcomeJson, arg.IdempotencyKey)
+func (q *Queries) RecordIntegrationMergeFencedAmbiguous(ctx context.Context, arg RecordIntegrationMergeFencedAmbiguousParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordIntegrationMergeFencedAmbiguous,
+		arg.CompletedAt,
+		arg.OutcomeJson,
+		arg.IdempotencyKey,
+		arg.DispatchOwner,
+		arg.DispatchFence,
+	)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
 }
 
-const recordIntegrationMergeResult = `-- name: RecordIntegrationMergeResult :execrows
+const recordIntegrationMergeFencedResult = `-- name: RecordIntegrationMergeFencedResult :execrows
 UPDATE integration_merge_journal
 SET state = 'result', completed_at = ?, outcome_json = ?
-WHERE idempotency_key = ? AND state IN ('accepted', 'dispatched')
+WHERE idempotency_key = ? AND state = 'dispatched'
+    AND dispatch_owner = ? AND dispatch_fence = ?
 `
 
-type RecordIntegrationMergeResultParams struct {
+type RecordIntegrationMergeFencedResultParams struct {
+	CompletedAt    sql.NullTime
+	OutcomeJson    sql.NullString
+	IdempotencyKey string
+	DispatchOwner  sql.NullString
+	DispatchFence  sql.NullString
+}
+
+func (q *Queries) RecordIntegrationMergeFencedResult(ctx context.Context, arg RecordIntegrationMergeFencedResultParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordIntegrationMergeFencedResult,
+		arg.CompletedAt,
+		arg.OutcomeJson,
+		arg.IdempotencyKey,
+		arg.DispatchOwner,
+		arg.DispatchFence,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const recordIntegrationMergePreDispatchResult = `-- name: RecordIntegrationMergePreDispatchResult :execrows
+UPDATE integration_merge_journal
+SET state = 'result', completed_at = ?, outcome_json = ?
+WHERE idempotency_key = ? AND state = 'accepted'
+`
+
+type RecordIntegrationMergePreDispatchResultParams struct {
 	CompletedAt    sql.NullTime
 	OutcomeJson    sql.NullString
 	IdempotencyKey string
 }
 
-func (q *Queries) RecordIntegrationMergeResult(ctx context.Context, arg RecordIntegrationMergeResultParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, recordIntegrationMergeResult, arg.CompletedAt, arg.OutcomeJson, arg.IdempotencyKey)
+func (q *Queries) RecordIntegrationMergePreDispatchResult(ctx context.Context, arg RecordIntegrationMergePreDispatchResultParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordIntegrationMergePreDispatchResult, arg.CompletedAt, arg.OutcomeJson, arg.IdempotencyKey)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const recordIntegrationMergeReconciledResult = `-- name: RecordIntegrationMergeReconciledResult :execrows
+UPDATE integration_merge_journal
+SET state = 'result', completed_at = ?, outcome_json = ?
+WHERE idempotency_key = ? AND state = 'dispatched'
+`
+
+type RecordIntegrationMergeReconciledResultParams struct {
+	CompletedAt    sql.NullTime
+	OutcomeJson    sql.NullString
+	IdempotencyKey string
+}
+
+func (q *Queries) RecordIntegrationMergeReconciledResult(ctx context.Context, arg RecordIntegrationMergeReconciledResultParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordIntegrationMergeReconciledResult, arg.CompletedAt, arg.OutcomeJson, arg.IdempotencyKey)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const recordIntegrationMergeRefinedResult = `-- name: RecordIntegrationMergeRefinedResult :execrows
+UPDATE integration_merge_journal
+SET state = 'result', completed_at = ?, outcome_json = ?
+WHERE idempotency_key = ? AND state = 'ambiguous'
+`
+
+type RecordIntegrationMergeRefinedResultParams struct {
+	CompletedAt    sql.NullTime
+	OutcomeJson    sql.NullString
+	IdempotencyKey string
+}
+
+func (q *Queries) RecordIntegrationMergeRefinedResult(ctx context.Context, arg RecordIntegrationMergeRefinedResultParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, recordIntegrationMergeRefinedResult, arg.CompletedAt, arg.OutcomeJson, arg.IdempotencyKey)
 	if err != nil {
 		return 0, err
 	}

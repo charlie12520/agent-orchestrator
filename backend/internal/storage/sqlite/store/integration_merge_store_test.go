@@ -104,19 +104,45 @@ func TestIntegrationMergeJournalTransitionsAndEvidence(t *testing.T) {
 	if err != nil || !accepted {
 		t.Fatalf("accept = %v, %v", accepted, err)
 	}
-	dispatched, changed, err := store.MarkIntegrationMergeDispatched(ctx, journal.IdempotencyKey, now.Add(time.Second))
+	owner, fence := "dispatch-owner-store-01", "imf_abcdefghijklmnop"
+	dispatched, changed, err := store.MarkIntegrationMergeDispatched(ctx, journal.IdempotencyKey, owner, fence, now.Add(time.Second))
 	if err != nil || !changed || dispatched.State != domain.IntegrationMergeDispatched || dispatched.DispatchedAt.IsZero() {
 		t.Fatalf("dispatch = %#v, %v, %v", dispatched, changed, err)
 	}
+	if dispatched.DispatchOwner != owner || dispatched.DispatchFence != fence {
+		t.Fatalf("dispatch fence = %#v", dispatched)
+	}
+	if current, changed, err := store.MarkIntegrationMergeDispatched(ctx, journal.IdempotencyKey, "dispatch-owner-stale", "imf_stalestalestalestale", now.Add(2*time.Second)); err != nil || changed || current.DispatchOwner != owner || current.DispatchFence != fence {
+		t.Fatalf("stale redispatch = %#v, %v, %v", current, changed, err)
+	}
+	if current, confirmed, err := store.ConfirmIntegrationMergeDispatch(ctx, journal.IdempotencyKey, "dispatch-owner-wrong", fence); err != nil || confirmed || current.State != domain.IntegrationMergeDispatched {
+		t.Fatalf("wrong owner confirmation = %#v, %v, %v", current, confirmed, err)
+	}
+	if current, confirmed, err := store.ConfirmIntegrationMergeDispatch(ctx, journal.IdempotencyKey, owner, "imf_wrongwrongwrongwrong"); err != nil || confirmed || current.State != domain.IntegrationMergeDispatched {
+		t.Fatalf("wrong fence confirmation = %#v, %v, %v", current, confirmed, err)
+	}
+	if _, confirmed, err := store.ConfirmIntegrationMergeDispatch(ctx, journal.IdempotencyKey, owner, fence); err != nil || !confirmed {
+		t.Fatalf("owner confirmation = %v, %v", confirmed, err)
+	}
 	outcome := integrationOutcome(journal.IdempotencyKey, lease, dispatched, domain.IntegrationMergeOutcomeMerged)
-	result, changed, err := store.RecordIntegrationMergeResult(ctx, journal.IdempotencyKey, outcome, outcome.CompletedAt)
+	if current, changed, err := store.RecordIntegrationMergeFencedResult(ctx, journal.IdempotencyKey, "dispatch-owner-wrong", fence, outcome, outcome.CompletedAt); err != nil || changed || current.State != domain.IntegrationMergeDispatched {
+		t.Fatalf("wrong owner result = %#v, %v, %v", current, changed, err)
+	}
+	ambiguous := outcome
+	ambiguous.Status = domain.IntegrationMergeOutcomeAmbiguous
+	ambiguous.Reason = "authorized_merge_not_proven"
+	ambiguous.MergeCommitSHA = ""
+	if current, changed, err := store.RecordIntegrationMergeFencedAmbiguous(ctx, journal.IdempotencyKey, owner, "imf_wrongwrongwrongwrong", ambiguous, ambiguous.CompletedAt); err != nil || changed || current.State != domain.IntegrationMergeDispatched {
+		t.Fatalf("wrong fence ambiguity = %#v, %v, %v", current, changed, err)
+	}
+	result, changed, err := store.RecordIntegrationMergeFencedResult(ctx, journal.IdempotencyKey, owner, fence, outcome, outcome.CompletedAt)
 	if err != nil || !changed || result.State != domain.IntegrationMergeResult || result.Outcome == nil {
 		t.Fatalf("result = %#v, %v, %v", result, changed, err)
 	}
 	if result.Outcome.MergeCommitSHA != strings.Repeat("b", 40) || len(result.Outcome.Checks) != 1 || len(result.Outcome.Reviews) != 1 {
 		t.Fatalf("durable evidence = %#v", result.Outcome)
 	}
-	if _, changed, err := store.MarkIntegrationMergeDispatched(ctx, journal.IdempotencyKey, now.Add(3*time.Second)); err != nil || changed {
+	if _, changed, err := store.MarkIntegrationMergeDispatched(ctx, journal.IdempotencyKey, owner, fence, now.Add(3*time.Second)); err != nil || changed {
 		t.Fatalf("terminal redispatch changed=%v err=%v", changed, err)
 	}
 }
@@ -138,9 +164,45 @@ func TestIntegrationMergeAcceptedMayEndInPreDispatchRevalidationResult(t *testin
 	outcome := integrationOutcome(journal.IdempotencyKey, lease, journal, domain.IntegrationMergeOutcomeRevalidationRequired)
 	outcome.Reason = "candidate_identity_changed"
 	outcome.MergeCommitSHA = ""
-	result, changed, err := store.RecordIntegrationMergeResult(ctx, journal.IdempotencyKey, outcome, outcome.CompletedAt)
+	result, changed, err := store.RecordIntegrationMergePreDispatchResult(ctx, journal.IdempotencyKey, outcome, outcome.CompletedAt)
 	if err != nil || !changed || result.State != domain.IntegrationMergeResult || !result.DispatchedAt.IsZero() {
 		t.Fatalf("predispatch result = %#v changed=%v err=%v", result, changed, err)
+	}
+}
+
+func TestIntegrationMergeAmbiguityCanOnlyRefineToExactResult(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := time.Date(2026, time.July, 30, 16, 30, 0, 0, time.UTC)
+	lease := integrationLease("iml_ambiguous-refinement-01", now)
+	created, err := store.CreateIntegrationMergeLease(ctx, lease, now)
+	if err != nil || !created {
+		t.Fatal(err)
+	}
+	journal := integrationJournal("operation-ambiguous-refinement-01", lease.ID, now)
+	accepted, _, err := store.AcceptIntegrationMerge(ctx, journal, now)
+	if err != nil || !accepted {
+		t.Fatal(err)
+	}
+	owner, fence := "dispatch-owner-refinement", "imf_refinementfence01"
+	dispatched, changed, err := store.MarkIntegrationMergeDispatched(ctx, journal.IdempotencyKey, owner, fence, now.Add(time.Second))
+	if err != nil || !changed {
+		t.Fatalf("dispatch=%#v changed=%v err=%v", dispatched, changed, err)
+	}
+	ambiguous := integrationOutcome(journal.IdempotencyKey, lease, dispatched, domain.IntegrationMergeOutcomeAmbiguous)
+	ambiguous.Reason = "authoritative_reconciliation_unavailable"
+	ambiguous.MergeCommitSHA = ""
+	stored, changed, err := store.RecordIntegrationMergeFencedAmbiguous(ctx, journal.IdempotencyKey, owner, fence, ambiguous, ambiguous.CompletedAt)
+	if err != nil || !changed || stored.State != domain.IntegrationMergeAmbiguous {
+		t.Fatalf("ambiguity=%#v changed=%v err=%v", stored, changed, err)
+	}
+	result := integrationOutcome(journal.IdempotencyKey, lease, dispatched, domain.IntegrationMergeOutcomeMerged)
+	refined, changed, err := store.RecordIntegrationMergeRefinedResult(ctx, journal.IdempotencyKey, result, result.CompletedAt)
+	if err != nil || !changed || refined.State != domain.IntegrationMergeResult || refined.Outcome == nil || refined.Outcome.MergeCommitSHA == "" {
+		t.Fatalf("refinement=%#v changed=%v err=%v", refined, changed, err)
+	}
+	if current, changed, err := store.RecordIntegrationMergeRefinedResult(ctx, journal.IdempotencyKey, result, result.CompletedAt); err != nil || changed || current.State != domain.IntegrationMergeResult {
+		t.Fatalf("second refinement=%#v changed=%v err=%v", current, changed, err)
 	}
 }
 

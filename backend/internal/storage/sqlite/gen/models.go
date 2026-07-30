@@ -28,6 +28,8 @@ type IntegrationMergeJournal struct {
 	State          string
 	AcceptedAt     time.Time
 	DispatchedAt   sql.NullTime
+	DispatchOwner  sql.NullString
+	DispatchFence  sql.NullString
 	CompletedAt    sql.NullTime
 	OutcomeJson    sql.NullString
 }

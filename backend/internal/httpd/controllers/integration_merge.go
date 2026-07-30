@@ -1,10 +1,12 @@
 package controllers
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,11 +17,15 @@ import (
 	integrationmerge "github.com/aoagents/agent-orchestrator/backend/internal/service/integrationmerge"
 )
 
-const maxIntegrationMergeBodyBytes = 64 << 10
+const (
+	maxIntegrationMergeBodyBytes = 64 << 10
+	maxIntegrationMergeJSONDepth = 32
+)
 
 // IntegrationMergeController owns the root-authenticated deterministic merge
-// contract. Production leaves Svc nil until managed control and a separate
-// MergeBroker/GitHub App client are both wired.
+// contract. Production leaves Svc nil until managed control, a separate
+// MergeBroker/GitHub App client, and a trusted dispatch-owner verifier are all
+// wired.
 type IntegrationMergeController struct {
 	Svc integrationmerge.Manager
 }
@@ -167,7 +173,14 @@ func (c *IntegrationMergeController) merge(w http.ResponseWriter, r *http.Reques
 
 func decodeBoundedStrictJSON(w http.ResponseWriter, r *http.Request, out any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxIntegrationMergeBodyBytes)
-	dec := json.NewDecoder(r.Body)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return err
+	}
+	if err := rejectDuplicateJSONMembers(body); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
 		return err
@@ -179,6 +192,89 @@ func decodeBoundedStrictJSON(w http.ResponseWriter, r *http.Request, out any) er
 		return err
 	}
 	return nil
+}
+
+// rejectDuplicateJSONMembers walks the bounded token stream before binding it
+// to a struct. encoding/json otherwise accepts last-member-wins duplicates,
+// including inside nested policy objects. Case-folding also rejects aliases
+// that Go's struct decoder would match case-insensitively.
+func rejectDuplicateJSONMembers(body []byte) error {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return errors.New("JSON body must be an object")
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := walkUniqueJSONValue(dec, 0); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func walkUniqueJSONValue(dec *json.Decoder, depth int) error {
+	if depth > maxIntegrationMergeJSONDepth {
+		return errors.New("JSON nesting exceeds limit")
+	}
+	token, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, isDelim := token.(json.Delim)
+	if !isDelim {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for dec.More() {
+			keyToken, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("JSON object member must be a string")
+			}
+			canonical := strings.ToLower(key)
+			if _, duplicate := seen[canonical]; duplicate {
+				return errors.New("duplicate JSON object member")
+			}
+			seen[canonical] = struct{}{}
+			if err := walkUniqueJSONValue(dec, depth+1); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim('}') {
+			return errors.New("invalid JSON object terminator")
+		}
+		return nil
+	case '[':
+		for dec.More() {
+			if err := walkUniqueJSONValue(dec, depth+1); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim(']') {
+			return errors.New("invalid JSON array terminator")
+		}
+		return nil
+	default:
+		return errors.New("unexpected JSON delimiter")
+	}
 }
 
 func writeIntegrationMergeInvalidJSON(w http.ResponseWriter, r *http.Request) {
@@ -210,6 +306,8 @@ func writeIntegrationMergeError(w http.ResponseWriter, r *http.Request, err erro
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "MANUAL_APPROVAL_REQUIRED", "Manual approval is required", nil)
 	case integrationmerge.CodeRevalidationRequired:
 		envelope.WriteAPIError(w, r, http.StatusUnprocessableEntity, "unprocessable", "REVALIDATION_REQUIRED", "Candidate revalidation is required", map[string]any{"reason": reason})
+	case integrationmerge.CodeReconciliationInProgress:
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "RECONCILIATION_IN_PROGRESS", "Integration merge reconciliation is in progress", nil)
 	case integrationmerge.CodeBrokerUnavailable:
 		envelope.WriteAPIError(w, r, http.StatusServiceUnavailable, "unavailable", "MERGE_BROKER_UNAVAILABLE", "Merge broker is unavailable", nil)
 	default:
