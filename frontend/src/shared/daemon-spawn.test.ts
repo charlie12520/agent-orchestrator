@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { DAEMON_SERVICE_NAME, type DaemonProbe, type DaemonProber } from "./daemon-attach";
 import { EXPECTED_DAEMON_ATTESTATION, type DaemonAttestation } from "./daemon-attestation";
-import { verifySpawnedDaemon } from "./daemon-spawn";
+import { authoritativeSpawnPid, verifySpawnedDaemon } from "./daemon-spawn";
 
 const ATTESTATION: DaemonAttestation = {
 	contractVersion: EXPECTED_DAEMON_ATTESTATION.contractVersion,
@@ -90,6 +90,39 @@ describe("fresh-spawn compatibility gate", () => {
 			expectedPid: 9999,
 		});
 		expect(result).toMatchObject({ state: "error", code: "identity_mismatch", pid: 4242 });
+	});
+
+	it.each(["configured", "bundled"] as const)(
+		"accepts a %s launch when the compatible daemon reports the direct child PID",
+		async (source) => {
+			const result = await verifySpawnedDaemon({
+				...BASE,
+				discovery: { source: "listen", port: 4317 },
+				probe: prober(probe("ok"), probe("ready")),
+				expectedPid: authoritativeSpawnPid(source, 4242),
+			});
+			expect(result).toMatchObject({ state: "ready", port: 4317, pid: 4242 });
+		},
+	);
+
+	it("rejects a configured launch when the compatible daemon does not report the direct child PID", async () => {
+		const result = await verifySpawnedDaemon({
+			...BASE,
+			discovery: { source: "listen", port: 4317 },
+			probe: prober(probe("ok"), probe("ready")),
+			expectedPid: authoritativeSpawnPid("configured", 9999),
+		});
+		expect(result).toMatchObject({ state: "error", code: "identity_mismatch", pid: 4242 });
+	});
+
+	it("keeps the development go-run wrapper exempt from direct-child PID matching", async () => {
+		const result = await verifySpawnedDaemon({
+			...BASE,
+			discovery: { source: "listen", port: 4317 },
+			probe: prober(probe("ok"), probe("ready")),
+			expectedPid: authoritativeSpawnPid("dev", 9999),
+		});
+		expect(result).toMatchObject({ state: "ready", port: 4317, pid: 4242 });
 	});
 
 	it("rejects a legacy runfile before live API use", async () => {

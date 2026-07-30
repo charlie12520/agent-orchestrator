@@ -61,7 +61,11 @@ import { readMigrationState, updateMigration, writeAppStateMarker, type Migratio
 import { isAllowedAppExternalURL, openAllowedAppExternalURL } from "./main/external-open";
 import { buildWindowsAppMenuTemplate } from "./main/menu";
 import { scanImportFolder } from "./main/import-folder-scan";
-import { verifySpawnedDaemon, type SpawnDaemonDiscovery } from "./shared/daemon-spawn";
+import {
+	authoritativeSpawnPid,
+	verifySpawnedDaemon,
+	type SpawnDaemonDiscovery,
+} from "./shared/daemon-spawn";
 
 // Globals injected at compile time by @electron-forge/plugin-vite.
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
@@ -1042,7 +1046,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 			isProcessAlive: processAlive,
 			probe: readDaemonProbe,
 			identityError: (probe) => daemonIdentityError(launch, probe),
-			expectedPid: launch.source === "bundled" ? child.pid : undefined,
+			expectedPid: authoritativeSpawnPid(launch.source, child.pid),
 		})
 			.then((status) => {
 				if (daemonProcess !== child || daemonStoppingProcess === child) return;
