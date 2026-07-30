@@ -82,6 +82,11 @@ export const EXPECTED_ATTESTATION = Object.freeze({
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const SAFE_VERSION = /^[0-9A-Za-z][0-9A-Za-z._+-]*$/;
 
+export function resolveBuildMode({ env = process.env, args = process.argv.slice(2) } = {}) {
+	if (args.includes("--release")) return "release";
+	return env.AO_BUILD_MODE ?? (env.CI ? "release" : "development");
+}
+
 export function validateBuildInputs({ version, commit, mode }) {
 	if (!SAFE_VERSION.test(version) || ["dev", "development", "unknown"].includes(version.toLowerCase())) {
 		throw new Error(`AO build version must be explicit and linker-safe, got ${JSON.stringify(version)}`);

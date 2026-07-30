@@ -162,6 +162,10 @@ npm run package        # Package for current platform
 npm run make           # Create distributables when platform packaging deps are installed
 ```
 
+`npm run package`, `npm run make`, and `npm run publish` automatically rebuild
+the bundled daemon with release attestation before Electron Forge runs. Ordinary
+`npm run dev` startup continues to build a development-attested daemon.
+
 On a fresh Linux machine, treat `npm run package` as the default local build
 path. `npm run make` also needs Linux packaging tools that are not provided by a
 minimal setup or by `nix develop` today:

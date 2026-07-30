@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveDaemonLaunch } from "./daemon-launch";
+import { configuredDaemonPreflightCommand, resolveDaemonLaunch } from "./daemon-launch";
 
 describe("resolveDaemonLaunch", () => {
 	it("uses AO_DAEMON_COMMAND when configured", () => {
@@ -11,7 +11,37 @@ describe("resolveDaemonLaunch", () => {
 			cwd: "/app",
 			shell: true,
 			source: "configured",
+			preflightCommand: "/tmp/ao version --json",
 		});
+	});
+
+	it("derives preflight without changing a quoted Windows daemon command", () => {
+		const command = '"C:\\Program Files\\Agent Orchestrator\\ao.exe" daemon --port 4317';
+		const launch = resolveDaemonLaunch(
+			{ AO_DAEMON_COMMAND: command },
+			true,
+			"C:\\resources",
+			"C:\\app",
+			"C:\\Users\\a",
+			"win32",
+		);
+		expect(launch).toMatchObject({
+			command,
+			args: [],
+			shell: true,
+			preflightCommand: '"C:\\Program Files\\Agent Orchestrator\\ao.exe" version --json',
+		});
+	});
+
+	it("preserves go-run and quoted checkout prefixes while removing daemon-only arguments", () => {
+		expect(configuredDaemonPreflightCommand('go run "./cmd/ao" daemon --port 4317', "darwin")).toBe(
+			'go run "./cmd/ao" version --json',
+		);
+	});
+
+	it("refuses ambiguous configured pipelines instead of executing a partial preflight", () => {
+		expect(configuredDaemonPreflightCommand("ao daemon && echo unsafe", "darwin")).toBeNull();
+		expect(configuredDaemonPreflightCommand("ao --help", "darwin")).toBeNull();
 	});
 
 	it("runs the backend daemon from source in dev without an explicit command", () => {

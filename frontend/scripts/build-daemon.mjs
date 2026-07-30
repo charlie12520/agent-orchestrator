@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { buildLdflags, validateBuildInputs, validateBuiltAttestation } from "./build-attestation.mjs";
+import { buildLdflags, resolveBuildMode, validateBuildInputs, validateBuiltAttestation } from "./build-attestation.mjs";
 import { resolveBuildProvenance } from "./build-provenance.mjs";
 import { meetsMinimumVersion, parseGoVersion, parseMinimumGoVersion } from "./go-version.mjs";
 
@@ -16,7 +16,7 @@ const manifestPath = join(outDir, "ao.attestation.json");
 const minimumGoVersion = parseMinimumGoVersion(readFileSync(join(backendRoot, "go.mod"), "utf8"));
 
 const packageVersion = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8")).version;
-const buildMode = process.env.AO_BUILD_MODE ?? (process.env.CI ? "release" : "development");
+const buildMode = resolveBuildMode();
 let forkCommit;
 try {
 	forkCommit = resolveBuildProvenance({ repoRoot, mode: buildMode });
@@ -43,7 +43,9 @@ if (!minimumGoVersion) {
 
 const versionResult = spawnSync("go", ["version"], { encoding: "utf8" });
 if (versionResult.error) {
-	console.error(`Go ${minimumGoVersion.join(".")}+ is required, but Go could not be started: ${versionResult.error.message}`);
+	console.error(
+		`Go ${minimumGoVersion.join(".")}+ is required, but Go could not be started: ${versionResult.error.message}`,
+	);
 	process.exit(1);
 }
 const actualGoVersion = parseGoVersion(versionResult.stdout);
@@ -56,10 +58,14 @@ if (versionResult.status !== 0 || !actualGoVersion || !meetsMinimumVersion(actua
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-const result = spawnSync("go", ["build", "-trimpath", "-buildvcs=false", "-ldflags", buildLdflags(buildMetadata), "-o", outPath, "./cmd/ao"], {
-	cwd: backendRoot,
-	stdio: "inherit",
-});
+const result = spawnSync(
+	"go",
+	["build", "-trimpath", "-buildvcs=false", "-ldflags", buildLdflags(buildMetadata), "-o", outPath, "./cmd/ao"],
+	{
+		cwd: backendRoot,
+		stdio: "inherit",
+	},
+);
 
 if (result.error) {
 	console.error(`failed to start go build: ${result.error.message}`);
@@ -74,7 +80,9 @@ const attestationResult = spawnSync(outPath, ["version", "--json"], {
 	encoding: "utf8",
 });
 if (attestationResult.error || attestationResult.status !== 0) {
-	console.error(`built daemon attestation probe failed: ${attestationResult.error?.message ?? attestationResult.stderr}`);
+	console.error(
+		`built daemon attestation probe failed: ${attestationResult.error?.message ?? attestationResult.stderr}`,
+	);
 	process.exit(attestationResult.status ?? 1);
 }
 try {

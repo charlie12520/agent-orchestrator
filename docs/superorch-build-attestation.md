@@ -163,4 +163,8 @@ created by this attestation.
 The Electron daemon build uses `-trimpath -buildvcs=false` and deterministic
 linker values, executes `ao version --json`, validates the result, and only then
 retains the binary. The npm platform-binary release script applies the same
-stamps to every cross-compiled target.
+stamps to every cross-compiled target. `npm run build:daemon` remains a
+development build for ordinary local work. The `prepackage` and `premake`
+lifecycle hooks and the publish script use `npm run build:daemon:release`, so
+local `npm run package`, `npm run make`, and `npm run publish` cannot silently
+bundle a development-attested daemon.

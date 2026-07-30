@@ -12,7 +12,7 @@ export type DaemonPreflightResult = { exitCode: number | null; stdout: string; s
 export type DaemonPreflightRunner = (spec: DaemonPreflightSpec) => Promise<DaemonPreflightResult>;
 export type DaemonManifestReader = (path: string) => Promise<string>;
 
-export function daemonPreflightSpec(launch: DaemonLaunchSpec): DaemonPreflightSpec {
+export function daemonPreflightSpec(launch: DaemonLaunchSpec): DaemonPreflightSpec | null {
 	if (launch.source === "bundled") {
 		return { command: launch.command, args: ["version", "--json"], cwd: path.dirname(launch.command), shell: false };
 	}
@@ -24,7 +24,7 @@ export function daemonPreflightSpec(launch: DaemonLaunchSpec): DaemonPreflightSp
 			shell: false,
 		};
 	}
-	return { command: launch.command, args: ["version", "--json"], cwd: launch.cwd, shell: true };
+	return launch.preflightCommand ? { command: launch.preflightCommand, args: [], cwd: launch.cwd, shell: true } : null;
 }
 
 /** Validate the candidate executable before it can open or migrate AO storage. */
@@ -34,6 +34,9 @@ export async function preflightDaemonLaunch(
 	readManifest?: DaemonManifestReader,
 ): Promise<string | null> {
 	const spec = daemonPreflightSpec(launch);
+	if (!spec) {
+		return "AO_DAEMON_COMMAND must contain an unambiguous AO daemon subcommand so compatibility can be verified before spawn.";
+	}
 	const result = await runner(spec);
 	if (result.error) return `Could not inspect the AO daemon candidate: ${result.error}`;
 	if (result.exitCode !== 0) {

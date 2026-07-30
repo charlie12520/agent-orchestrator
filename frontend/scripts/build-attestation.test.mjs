@@ -1,11 +1,18 @@
 // @vitest-environment node
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
 	buildLdflags,
 	EXPECTED_ATTESTATION,
+	resolveBuildMode,
 	validateBuildInputs,
 	validateBuiltAttestation,
 } from "./build-attestation.mjs";
+import { preflightDaemonLaunch } from "../src/main/daemon-preflight.ts";
+
+const frontendRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const build = {
 	version: "0.10.3-superorch.1",
@@ -29,6 +36,42 @@ function attestation(overrides = {}) {
 }
 
 describe("daemon build attestation", () => {
+	it("keeps ordinary local daemon builds in development mode", () => {
+		expect(resolveBuildMode({ env: {}, args: [] })).toBe("development");
+		expect(resolveBuildMode({ env: { AO_BUILD_MODE: "development" }, args: [] })).toBe("development");
+		expect(resolveBuildMode({ env: { CI: "1" }, args: [] })).toBe("release");
+	});
+
+	it("forces release mode for an explicit packaged build", () => {
+		expect(resolveBuildMode({ env: {}, args: ["--release"] })).toBe("release");
+		expect(resolveBuildMode({ env: { AO_BUILD_MODE: "development" }, args: ["--release"] })).toBe("release");
+	});
+
+	it("routes every local packaging lifecycle through the release daemon build", () => {
+		const packageJson = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8"));
+		expect(packageJson.scripts["build:daemon:release"]).toBe("node ./scripts/build-daemon.mjs --release");
+		expect(packageJson.scripts.prepackage).toBe("npm run build:daemon:release");
+		expect(packageJson.scripts.premake).toBe("npm run build:daemon:release");
+		expect(packageJson.scripts.publish).toContain("npm run build:daemon:release");
+		expect(packageJson.scripts.predev).toBe("npm run build:daemon");
+	});
+
+	it("produces a local packaged build mode accepted by the bundled startup gate", async () => {
+		const packagedBuild = { ...build, mode: resolveBuildMode({ env: {}, args: ["--release"] }) };
+		const candidate = attestation({ build: packagedBuild });
+		const launch = {
+			command: "/app/resources/daemon/ao",
+			args: ["daemon"],
+			cwd: "/home/user/.ao",
+			shell: false,
+			source: "bundled",
+		};
+		const run = async () => ({ exitCode: 0, stdout: JSON.stringify(candidate), stderr: "" });
+		const readManifest = async () => JSON.stringify(candidate);
+
+		expect(await preflightDaemonLaunch(launch, run, readManifest)).toBeNull();
+	});
+
 	it("builds deterministic linker flags without dates or local paths", () => {
 		const flags = buildLdflags(build);
 		expect(flags).toContain(`BuildVersion=${build.version}`);
