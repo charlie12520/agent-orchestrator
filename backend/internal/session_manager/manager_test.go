@@ -2490,6 +2490,7 @@ func TestSpawn_DefaultsBranchFromSessionID(t *testing.T) {
 func TestSpawn_DefaultsBranchUnderDevNamespaceForDevDataDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	m, st, _, _ := newManager()
 	m.dataDir = filepath.Join(home, ".ao", "dev", "data")
 
@@ -4123,7 +4124,12 @@ func TestSpawnAndRestore_PrependsResolvedBinaryAndNodeDirsToRuntimePATH(t *testi
 			t.Fatal(err)
 		}
 	}
-	want := strings.Join([]string{binDir, nodeDir, filepath.Dir(daemonExe), "/usr/bin"}, string(os.PathListSeparator))
+	wantPath := []string{binDir}
+	if runtime.GOOS != "windows" {
+		wantPath = append(wantPath, nodeDir)
+	}
+	wantPath = append(wantPath, filepath.Dir(daemonExe), "/usr/bin")
+	want := strings.Join(wantPath, string(os.PathListSeparator))
 
 	for _, operation := range []string{"spawn", "restore"} {
 		t.Run(operation, func(t *testing.T) {
@@ -4169,6 +4175,7 @@ func TestSpawn_DoesNotAddNodeRuntimeForNativeBinary(t *testing.T) {
 	home := t.TempDir()
 	binDir := filepath.Join(home, "native", "bin")
 	agentBin := filepath.Join(binDir, "agent")
+	daemonExe := filepath.FromSlash("/ao/bin/ao")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -4188,7 +4195,7 @@ func TestSpawn_DoesNotAddNodeRuntimeForNativeBinary(t *testing.T) {
 			}
 			return agentBin, nil
 		},
-		Executable: func() (string, error) { return "/ao/bin/ao", nil },
+		Executable: func() (string, error) { return daemonExe, nil },
 	})
 	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -4196,7 +4203,7 @@ func TestSpawn_DoesNotAddNodeRuntimeForNativeBinary(t *testing.T) {
 	if nodeLookups != 0 {
 		t.Fatalf("node LookPath calls = %d, want 0 for native binary", nodeLookups)
 	}
-	want := strings.Join([]string{binDir, "/ao/bin", "/usr/bin"}, string(os.PathListSeparator))
+	want := strings.Join([]string{binDir, filepath.Dir(daemonExe), "/usr/bin"}, string(os.PathListSeparator))
 	if got := rt.lastCfg.Env["PATH"]; got != want {
 		t.Fatalf("runtime env PATH = %q, want %q", got, want)
 	}

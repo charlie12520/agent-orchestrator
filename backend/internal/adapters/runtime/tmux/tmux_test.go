@@ -66,6 +66,44 @@ func (rr *recordingReaper) reap(_ context.Context, pids []int, grace time.Durati
 
 // -- helpers --
 
+const execRunnerHelperEnv = "AO_TMUX_EXEC_RUNNER_TEST_HELPER"
+
+func TestExecRunnerHelperProcess(t *testing.T) {
+	mode := os.Getenv(execRunnerHelperEnv)
+	if mode == "" {
+		return
+	}
+	if mode == "pwd" {
+		wd, err := os.Getwd()
+		if err != nil {
+			_, _ = os.Stderr.WriteString(err.Error())
+			os.Exit(2)
+		}
+		_, _ = os.Stdout.WriteString(wd)
+		os.Exit(0)
+	}
+	code, err := strconv.Atoi(mode)
+	if err != nil {
+		_, _ = os.Stderr.WriteString(err.Error())
+		os.Exit(2)
+	}
+	os.Exit(code)
+}
+
+func runExecRunnerPwd(t *testing.T) ([]byte, error) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	return (execRunner{}).Run(
+		context.Background(),
+		[]string{execRunnerHelperEnv + "=pwd"},
+		executable,
+		"-test.run=^TestExecRunnerHelperProcess$",
+	)
+}
+
 func newTestRuntime(chunkSize int) (*Runtime, *fakeRunner) {
 	fr := &fakeRunner{}
 	r := New(Options{Binary: "tmux-test", Timeout: time.Second, Shell: "/bin/sh", ChunkSize: chunkSize})
@@ -116,7 +154,7 @@ func TestNewPicksUpShellFromEnv(t *testing.T) {
 // execRunner (not the fakeRunner test seam every other test in this file
 // uses), so it is the only test that would catch a regression here.
 func TestExecRunnerRunsFromStableDir(t *testing.T) {
-	out, err := (execRunner{}).Run(context.Background(), nil, "sh", "-c", "pwd")
+	out, err := runExecRunnerPwd(t)
 	if err != nil {
 		t.Fatalf("execRunner.Run: %v", err)
 	}
@@ -145,12 +183,15 @@ func TestExecRunnerRunsFromStableDir(t *testing.T) {
 // with "chdir <dir>: no such file or directory" — the same dead-cwd failure
 // #2775 was about, just moved. Run must degrade to a directory that exists.
 func TestExecRunnerFallsBackWhenTempDirMissing(t *testing.T) {
-	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "deleted-by-an-update"))
+	missingTempDir := filepath.Join(t.TempDir(), "deleted-by-an-update")
+	t.Setenv("TMPDIR", missingTempDir)
+	t.Setenv("TMP", missingTempDir)
+	t.Setenv("TEMP", missingTempDir)
 	if _, err := os.Stat(os.TempDir()); !os.IsNotExist(err) {
 		t.Fatalf("precondition: os.TempDir() %q should not exist, stat err = %v", os.TempDir(), err)
 	}
 
-	out, err := (execRunner{}).Run(context.Background(), nil, "sh", "-c", "pwd")
+	out, err := runExecRunnerPwd(t)
 	if err != nil {
 		t.Fatalf("execRunner.Run with a missing TMPDIR: %v", err)
 	}
@@ -1316,9 +1357,15 @@ func TestIsUnsupportedMatcher(t *testing.T) {
 
 func exitCodeErr(t *testing.T, code int) error {
 	t.Helper()
-	err := exec.Command("sh", "-c", "exit "+strconv.Itoa(code)).Run()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	cmd := exec.Command(executable, "-test.run=^TestExecRunnerHelperProcess$")
+	cmd.Env = append(os.Environ(), execRunnerHelperEnv+"="+strconv.Itoa(code))
+	err = cmd.Run()
 	if err == nil {
-		t.Fatalf("sh -c 'exit %d' should fail", code)
+		t.Fatalf("helper process exit %d should fail", code)
 	}
 	return err
 }
