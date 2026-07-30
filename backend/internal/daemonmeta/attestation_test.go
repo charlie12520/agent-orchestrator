@@ -34,7 +34,7 @@ func TestCurrentAttestationPinsEveryCompatibilityBoundary(t *testing.T) {
 	for _, capability := range []string{
 		"authenticatedGuardian", "authenticatedIpc", "authenticatedWatchdog", "durableEventReplay",
 		"durableMutationJournal", "generationFencing", "globalSupervisor", "omp", "prMerge", "prResolveComments",
-		"restrictedWorkerIsolation", "sessionInterrupt",
+		"restrictedWorkerIsolation", "sessionInterrupt", "managedMobileLANDisabled",
 	} {
 		if att.Capabilities[capability] {
 			t.Errorf("capability %q must remain disabled until implemented", capability)
@@ -43,6 +43,17 @@ func TestCurrentAttestationPinsEveryCompatibilityBoundary(t *testing.T) {
 	att.Capabilities["restApi"] = false
 	if !Current().Capabilities["restApi"] {
 		t.Fatal("Current returned a shared mutable capability map")
+	}
+}
+
+func TestWithManagedControlAttestsMobileLANIsDisabled(t *testing.T) {
+	base := Current()
+	managed := WithManagedControl(base)
+	if !managed.Capabilities["managedMobileLANDisabled"] {
+		t.Fatal("managed attestation did not declare the Connect Mobile LAN disablement")
+	}
+	if base.Capabilities["managedMobileLANDisabled"] {
+		t.Fatal("managed overlay mutated the standalone attestation")
 	}
 }
 

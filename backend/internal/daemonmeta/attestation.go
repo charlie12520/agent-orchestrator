@@ -132,6 +132,7 @@ func Current() Attestation {
 			"generationFencing":          false,
 			"globalSupervisor":           false,
 			"healthAttestation":          true,
+			"managedMobileLANDisabled":   false,
 			"omp":                        false,
 			"orchestrators":              true,
 			"prClaim":                    true,
@@ -168,6 +169,7 @@ func WithManagedControl(att Attestation) Attestation {
 	clone.Capabilities = cloneCapabilities(att.Capabilities)
 	clone.Capabilities["authenticatedIpc"] = true
 	clone.Capabilities["daemonControlGeneration"] = true
+	clone.Capabilities["managedMobileLANDisabled"] = true
 	return clone
 }
 
