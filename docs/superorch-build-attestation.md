@@ -40,7 +40,7 @@ verification; release distribution must provide those guarantees separately.
 		"durableMutationJournal": 0,
 		"generationFencing": 0,
 		"authenticatedIpc": 0,
-		"databaseSchema": 38
+		"databaseSchema": 40
 	},
 	"capabilities": {
 		"authenticatedGuardian": false,
