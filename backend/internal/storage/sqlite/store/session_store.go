@@ -205,6 +205,10 @@ func mapSessionRows(rows []gen.Session) []domain.SessionRecord {
 }
 
 func rowToRecord(row gen.Session) domain.SessionRecord {
+	var agentConfig *domain.AgentConfig
+	if row.AgentConfigSet {
+		agentConfig = &domain.AgentConfig{Model: row.AgentModel, Permissions: row.AgentPermissions}
+	}
 	return domain.SessionRecord{
 		ID:          row.ID,
 		ProjectID:   row.ProjectID,
@@ -227,6 +231,7 @@ func rowToRecord(row gen.Session) domain.SessionRecord {
 			RuntimeLaunchID:   row.RuntimeLaunchID,
 			AgentSessionID:    row.AgentSessionID,
 			Prompt:            row.Prompt,
+			AgentConfig:       agentConfig,
 			PreviewURL:        row.PreviewURL,
 			PreviewRevision:   row.PreviewRevision,
 		},
@@ -238,6 +243,7 @@ func rowToRecord(row gen.Session) domain.SessionRecord {
 
 func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams {
 	activity := normalActivity(rec.Activity, rec.CreatedAt)
+	agentConfigSet, agentModel, agentPermissions := sessionAgentConfigFields(rec.Metadata.AgentConfig)
 	return gen.InsertSessionParams{
 		ID:                 rec.ID,
 		ProjectID:          rec.ProjectID,
@@ -257,6 +263,9 @@ func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams
 		RuntimeLaunchID:    rec.Metadata.RuntimeLaunchID,
 		AgentSessionID:     rec.Metadata.AgentSessionID,
 		Prompt:             rec.Metadata.Prompt,
+		AgentConfigSet:     agentConfigSet,
+		AgentModel:         agentModel,
+		AgentPermissions:   agentPermissions,
 		PreviewURL:         rec.Metadata.PreviewURL,
 		PreviewRevision:    rec.Metadata.PreviewRevision,
 		TerminateOnPRMerge: rec.TerminateOnPRMerge,
@@ -268,6 +277,7 @@ func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams
 
 func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 	activity := normalActivity(rec.Activity, rec.UpdatedAt)
+	agentConfigSet, agentModel, agentPermissions := sessionAgentConfigFields(rec.Metadata.AgentConfig)
 	return gen.UpdateSessionParams{
 		ID:                 rec.ID,
 		IssueID:            rec.IssueID,
@@ -285,12 +295,22 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		RuntimeLaunchID:    rec.Metadata.RuntimeLaunchID,
 		AgentSessionID:     rec.Metadata.AgentSessionID,
 		Prompt:             rec.Metadata.Prompt,
+		AgentConfigSet:     agentConfigSet,
+		AgentModel:         agentModel,
+		AgentPermissions:   agentPermissions,
 		PreviewURL:         rec.Metadata.PreviewURL,
 		PreviewRevision:    rec.Metadata.PreviewRevision,
 		TerminateOnPRMerge: rec.TerminateOnPRMerge,
 		CleanupGeneration:  rec.CleanupGeneration,
 		UpdatedAt:          rec.UpdatedAt,
 	}
+}
+
+func sessionAgentConfigFields(cfg *domain.AgentConfig) (bool, string, domain.PermissionMode) {
+	if cfg == nil {
+		return false, "", ""
+	}
+	return true, cfg.Model, cfg.Permissions
 }
 
 // nullTimeToTime / timeToNullTime bridge the nullable first_signal_at column

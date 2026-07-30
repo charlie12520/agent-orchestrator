@@ -17,7 +17,7 @@ export const EXPECTED_ATTESTATION = Object.freeze({
 		durableMutationJournal: 0,
 		generationFencing: 0,
 		authenticatedIpc: 0,
-		databaseSchema: 40,
+		databaseSchema: 41,
 	}),
 	declaredCapabilities: Object.freeze({
 		authenticatedGuardian: false,

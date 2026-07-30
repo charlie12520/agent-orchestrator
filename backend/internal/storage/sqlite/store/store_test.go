@@ -244,6 +244,47 @@ func TestSessionCreateAssignsPerProjectID(t *testing.T) {
 	}
 }
 
+func TestSessionAgentConfigRoundTrips(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+
+	rec := sampleRecord("mer")
+	want := domain.AgentConfig{Model: "gpt-5.6-codex", Permissions: domain.PermissionModeAuto}
+	rec.Metadata.AgentConfig = &want
+	created, err := s.CreateSession(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.GetSession(ctx, created.ID)
+	if err != nil || !ok {
+		t.Fatalf("get: ok=%v err=%v", ok, err)
+	}
+	if got.Metadata.AgentConfig == nil || *got.Metadata.AgentConfig != want {
+		t.Fatalf("agent config = %#v, want %#v", got.Metadata.AgentConfig, want)
+	}
+
+	// A non-nil zero config is distinct from a legacy/unset row: it freezes
+	// adapter defaults for this session even if project defaults later change.
+	got.Metadata.AgentConfig = &domain.AgentConfig{}
+	if err := s.UpdateSession(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ = s.GetSession(ctx, created.ID)
+	if got.Metadata.AgentConfig == nil || !got.Metadata.AgentConfig.IsZero() {
+		t.Fatalf("zero agent config did not round-trip: %#v", got.Metadata.AgentConfig)
+	}
+
+	legacy, err := s.CreateSession(ctx, sampleRecord("mer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, _, _ = s.GetSession(ctx, legacy.ID)
+	if legacy.Metadata.AgentConfig != nil {
+		t.Fatalf("unset agent config = %#v, want nil", legacy.Metadata.AgentConfig)
+	}
+}
+
 // TestDeleteSessionOnlyRemovesSeedRows covers Bug 4's storage-layer guarantee:
 // DeleteSession removes a session row only when the row is still in seed state
 // (no workspace, no runtime handle, no agent session id, no prompt, not

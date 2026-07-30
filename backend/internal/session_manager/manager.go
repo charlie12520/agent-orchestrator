@@ -380,6 +380,11 @@ func New(d Deps) *Manager {
 // materialization fails the still-seed row is deleted outright; a later failure
 // parks the row as terminated and rolls back what was built.
 func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
+	if cfg.AgentConfig != nil {
+		if err := cfg.AgentConfig.Validate(); err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: agent config: %w", err)
+		}
+	}
 	project, err := m.loadProject(ctx, cfg.ProjectID)
 	if err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
@@ -468,7 +473,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false)
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: no agent adapter for harness %q", id, cfg.Harness)
 	}
-	agentConfig := effectiveAgentConfig(cfg.Kind, project.Config)
+	agentConfig := effectiveSessionAgentConfig(cfg.Kind, project.Config, cfg.AgentConfig)
 	env := m.runtimeEnv(id, cfg.ProjectID, cfg.IssueID, project.Config.Env)
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.prepareWorkspace(ctx, agent, id, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
@@ -537,6 +542,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		RuntimeHandleID:   handle.ID,
 		RuntimeLaunchID:   launchID,
 		Prompt:            prompt,
+		AgentConfig:       agentConfigPtr(agentConfig),
 	}
 	if err := m.lcm.MarkSpawned(ctx, id, metadata); err != nil {
 		runtimeDestroyed := m.runtime.Destroy(ctx, handle) == nil
@@ -729,6 +735,28 @@ func effectiveAgentConfig(kind domain.SessionKind, cfg domain.ProjectConfig) por
 		merged.Permissions = override.Permissions
 	}
 	return merged
+}
+
+// effectiveSessionAgentConfig overlays the set fields from a one-session
+// request on the project's role-resolved config. The result is persisted with
+// the session so restore and resume do not drift when project defaults change.
+func effectiveSessionAgentConfig(kind domain.SessionKind, cfg domain.ProjectConfig, override *domain.AgentConfig) ports.AgentConfig {
+	merged := effectiveAgentConfig(kind, cfg)
+	if override == nil {
+		return merged
+	}
+	if override.Model != "" {
+		merged.Model = override.Model
+	}
+	if override.Permissions != "" {
+		merged.Permissions = override.Permissions
+	}
+	return merged
+}
+
+func agentConfigPtr(cfg domain.AgentConfig) *domain.AgentConfig {
+	copy := cfg
+	return &copy
 }
 
 func roleOverride(kind domain.SessionKind, cfg domain.ProjectConfig) domain.RoleOverride {
@@ -1190,9 +1218,13 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 		return RestoreResult{}, fmt.Errorf("%s %s: system prompt file: %w", operation, rec.ID, err)
 	}
 
-	// Restore re-applies the project's resolved agent config so a configured
-	// model/permissions carry across a restore, matching fresh spawn.
+	// New sessions freeze their effective launch config. Legacy rows have no
+	// stored value and retain the historical behavior of resolving the current
+	// project config at restore time.
 	agentConfig := effectiveAgentConfig(rec.Kind, project.Config)
+	if rec.Metadata.AgentConfig != nil {
+		agentConfig = *rec.Metadata.AgentConfig
+	}
 	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.prepareWorkspace(ctx, agent, rec.ID, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
@@ -1242,6 +1274,7 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 		RuntimeLaunchID:   launchID,
 		AgentSessionID:    rec.Metadata.AgentSessionID,
 		Prompt:            rec.Metadata.Prompt,
+		AgentConfig:       agentConfigPtr(agentConfig),
 	}
 	if err := m.lcm.MarkSpawned(ctx, rec.ID, metadata); err != nil {
 		_ = m.runtime.Destroy(ctx, handle)
@@ -2175,6 +2208,38 @@ func (m *Manager) Cleanup(ctx context.Context, project domain.ProjectID) (Cleanu
 		m.cleanupSystemPromptDir(rec.ID)
 		result.Cleaned = append(result.Cleaned, rec.ID)
 	}
+	return result, nil
+}
+
+// CleanupSession reclaims only the named terminated session. It deliberately
+// reads one row instead of delegating to bulk Cleanup so no other session can
+// be selected as a side effect of this endpoint.
+func (m *Manager) CleanupSession(ctx context.Context, id domain.SessionID) (CleanupResult, error) {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return CleanupResult{}, fmt.Errorf("cleanup %s: %w", id, err)
+	}
+	if !ok {
+		return CleanupResult{}, fmt.Errorf("cleanup %s: %w", id, ErrNotFound)
+	}
+	result := CleanupResult{Cleaned: []domain.SessionID{}, Skipped: []CleanupSkip{}}
+	if !rec.IsTerminated {
+		return result, nil
+	}
+	ws := workspaceInfo(rec)
+	if ws.Path == "" {
+		m.cleanupSystemPromptDir(rec.ID)
+		return result, nil
+	}
+	if h := runtimeHandle(rec.Metadata); h.ID != "" {
+		_ = m.runtime.Destroy(ctx, h) // best effort; usually already gone
+	}
+	if reason := m.cleanupOne(ctx, rec, ws); reason != "" {
+		result.Skipped = append(result.Skipped, CleanupSkip{SessionID: rec.ID, Reason: reason})
+		return result, nil
+	}
+	m.cleanupSystemPromptDir(rec.ID)
+	result.Cleaned = append(result.Cleaned, rec.ID)
 	return result, nil
 }
 

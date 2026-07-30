@@ -1808,6 +1808,45 @@ paths:
       summary: Report an agent activity-state signal for a session
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/cleanup:
+    post:
+      operationId: cleanupSession
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CleanupSessionsResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Clean up one terminated session workspace
+      tags:
+      - sessions
   /api/v1/sessions/{sessionId}/kill:
     post:
       operationId: killSession
@@ -3214,6 +3253,8 @@ components:
       properties:
         activity:
           $ref: '#/components/schemas/DomainActivity'
+        agentConfig:
+          $ref: '#/components/schemas/AgentConfig'
         branch:
           type: string
         createdAt:
@@ -3237,6 +3278,8 @@ components:
         previewUrl:
           type: string
         projectId:
+          type: string
+        prompt:
           type: string
         prs:
           items:
@@ -3276,6 +3319,8 @@ components:
           type: boolean
         updatedAt:
           format: date-time
+          type: string
+        workspacePath:
           type: string
       required:
       - id
@@ -5066,6 +5111,8 @@ components:
       type: object
     SpawnSessionRequest:
       properties:
+        agentConfig:
+          $ref: '#/components/schemas/AgentConfig'
         attachments:
           items:
             $ref: '#/components/schemas/ControllersSpawnAttachmentInput'

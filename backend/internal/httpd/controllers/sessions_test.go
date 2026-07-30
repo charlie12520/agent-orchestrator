@@ -29,7 +29,9 @@ import (
 type fakeSessionService struct {
 	sessions        map[domain.SessionID]domain.Session
 	sent            string
+	spawnCfg        ports.SpawnConfig
 	cleanupProjects []domain.ProjectID
+	cleanupSessions []domain.SessionID
 	cleanupResult   []domain.SessionID
 	cleanupSkipped  []sessionsvc.CleanupSkipped
 	workspaceFiles  sessionsvc.WorkspaceFiles
@@ -125,8 +127,10 @@ func (f *fakeSessionService) Spawn(_ context.Context, cfg ports.SpawnConfig) (do
 	if f.spawnErr != nil {
 		return domain.Session{}, 0, 0, f.spawnErr
 	}
+	f.spawnCfg = cfg
 	now := time.Now().UTC()
-	s := domain.Session{SessionRecord: domain.SessionRecord{ID: domain.SessionID(string(cfg.ProjectID) + "-2"), ProjectID: cfg.ProjectID, IssueID: cfg.IssueID, Kind: cfg.Kind, Harness: cfg.Harness, DisplayName: cfg.DisplayName, Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}, CreatedAt: now, UpdatedAt: now}, Status: domain.StatusIdle}
+	id := domain.SessionID(string(cfg.ProjectID) + "-2")
+	s := domain.Session{SessionRecord: domain.SessionRecord{ID: id, ProjectID: cfg.ProjectID, IssueID: cfg.IssueID, Kind: cfg.Kind, Harness: cfg.Harness, DisplayName: cfg.DisplayName, Activity: domain.Activity{State: domain.ActivityIdle, LastActivityAt: now}, Metadata: domain.SessionMetadata{WorkspacePath: "/ws/" + string(id), Prompt: cfg.Prompt, AgentConfig: cfg.AgentConfig}, CreatedAt: now, UpdatedAt: now}, Status: domain.StatusIdle}
 	f.sessions[s.ID] = s
 	return s, len(cfg.Prompt), 0, nil
 }
@@ -223,6 +227,11 @@ func (f *fakeSessionService) Cleanup(_ context.Context, project domain.ProjectID
 		cleaned = []domain.SessionID{"ao-1"}
 	}
 	return sessionsvc.CleanupOutcome{Cleaned: cleaned, Skipped: f.cleanupSkipped}, nil
+}
+
+func (f *fakeSessionService) CleanupSession(_ context.Context, id domain.SessionID) (sessionsvc.CleanupOutcome, error) {
+	f.cleanupSessions = append(f.cleanupSessions, id)
+	return sessionsvc.CleanupOutcome{Cleaned: []domain.SessionID{id}, Skipped: []sessionsvc.CleanupSkipped{}}, nil
 }
 
 func (f *fakeSessionService) Rename(_ context.Context, id domain.SessionID, displayName string) error {
@@ -395,7 +404,7 @@ func TestSessionsRoutes_DefaultToStubsWithoutService(t *testing.T) {
 func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	svc := newFakeSessionService()
 	s := svc.sessions["ao-1"]
-	s.Metadata = domain.SessionMetadata{Branch: "qa/modal-worker", WorkspacePath: "/tmp/private-worktree", RuntimeHandleID: "runtime-1", Prompt: "private prompt"}
+	s.Metadata = domain.SessionMetadata{Branch: "qa/modal-worker", WorkspacePath: "/tmp/private-worktree", RuntimeHandleID: "runtime-1", Prompt: "saved prompt", AgentConfig: &domain.AgentConfig{Model: "gpt-5.6", Permissions: domain.PermissionModeAuto}}
 	s.SCMStatus = domain.StatusReviewPending
 	svc.sessions["ao-1"] = s
 	srv := newSessionTestServer(t, svc)
@@ -421,14 +430,14 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	if _, ok := rawList.Sessions[0]["metadata"]; ok {
 		t.Fatalf("list leaked metadata: %s", body)
 	}
-	if _, ok := rawList.Sessions[0]["workspacePath"]; ok {
-		t.Fatalf("list leaked workspacePath: %s", body)
+	if got := rawList.Sessions[0]["workspacePath"]; got != "/tmp/private-worktree" {
+		t.Fatalf("list workspacePath = %#v, want persisted launch path", got)
 	}
-	if _, ok := rawList.Sessions[0]["prompt"]; ok {
-		t.Fatalf("list leaked prompt: %s", body)
+	if got := rawList.Sessions[0]["prompt"]; got != "saved prompt" {
+		t.Fatalf("list prompt = %#v, want saved prompt", got)
 	}
 
-	body, status, _ = doRequest(t, srv, "POST", "/api/v1/sessions", `{"projectId":"ao","issueId":"ISS-1","kind":"worker","harness":"codex","prompt":"fix","displayName":"my worker"}`)
+	body, status, _ = doRequest(t, srv, "POST", "/api/v1/sessions", `{"projectId":"ao","issueId":"ISS-1","kind":"worker","harness":"codex","prompt":"fix","displayName":"my worker","agentConfig":{"model":"gpt-5.6-codex","permissions":"auto"}}`)
 	if status != http.StatusCreated {
 		t.Fatalf("POST session = %d, want 201; body=%s", status, body)
 	}
@@ -449,6 +458,20 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	}
 	if spawned.SystemPromptBytes == nil || *spawned.SystemPromptBytes != 0 {
 		t.Fatalf("spawned systemPromptBytes = %v, want present zero", spawned.SystemPromptBytes)
+	}
+	if svc.spawnCfg.AgentConfig == nil || svc.spawnCfg.AgentConfig.Model != "gpt-5.6-codex" || svc.spawnCfg.AgentConfig.Permissions != domain.PermissionModeAuto {
+		t.Fatalf("spawn agent config = %#v", svc.spawnCfg.AgentConfig)
+	}
+	var rawSpawn struct {
+		Session struct {
+			WorkspacePath string              `json:"workspacePath"`
+			Prompt        string              `json:"prompt"`
+			AgentConfig   *domain.AgentConfig `json:"agentConfig"`
+		} `json:"session"`
+	}
+	mustJSON(t, body, &rawSpawn)
+	if rawSpawn.Session.WorkspacePath != "/ws/ao-2" || rawSpawn.Session.Prompt != "fix" || rawSpawn.Session.AgentConfig == nil || rawSpawn.Session.AgentConfig.Model != "gpt-5.6-codex" {
+		t.Fatalf("spawn launch spec = %#v", rawSpawn.Session)
 	}
 
 	body, status, _ = doRequest(t, srv, "GET", "/api/v1/sessions/ao-2", "")
@@ -537,6 +560,17 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	body, status, _ = doRequest(t, srv, "POST", "/api/v1/orchestrators", `{"projectId":"ao"}`)
 	if status != http.StatusCreated {
 		t.Fatalf("orchestrator = %d, want 201; body=%s", status, body)
+	}
+}
+
+func TestSessionsAPI_SpawnRejectsInvalidAgentConfig(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions", `{"projectId":"ao","harness":"codex","agentConfig":{"permissions":"root"}}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_AGENT_CONFIG")
+	if svc.spawnCfg.ProjectID != "" {
+		t.Fatalf("invalid config reached Spawn: %#v", svc.spawnCfg)
 	}
 }
 
@@ -1564,6 +1598,27 @@ func TestSessionsAPI_CleanupWithoutProjectFilter(t *testing.T) {
 	}
 }
 
+func TestSessionsAPI_CleanupSessionIsIsolated(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/cleanup", "")
+	if status != http.StatusOK {
+		t.Fatalf("cleanup session = %d, want 200; body=%s", status, body)
+	}
+	var got controllers.CleanupSessionsResponse
+	mustJSON(t, body, &got)
+	if !got.OK || len(got.Cleaned) != 1 || got.Cleaned[0] != "ao-1" || len(got.Skipped) != 0 {
+		t.Fatalf("cleanup session response = %#v", got)
+	}
+	if len(svc.cleanupSessions) != 1 || svc.cleanupSessions[0] != "ao-1" {
+		t.Fatalf("cleanupSessions = %#v, want [ao-1]", svc.cleanupSessions)
+	}
+	if len(svc.cleanupProjects) != 0 {
+		t.Fatalf("session cleanup invoked bulk cleanup: %#v", svc.cleanupProjects)
+	}
+}
+
 type sessionBody struct {
 	ID               string `json:"id"`
 	ProjectID        string `json:"projectId"`
@@ -1572,6 +1627,8 @@ type sessionBody struct {
 	Harness          string `json:"harness"`
 	DisplayName      string `json:"displayName"`
 	Branch           string `json:"branch"`
+	WorkspacePath    string `json:"workspacePath"`
+	Prompt           string `json:"prompt"`
 	Status           string `json:"status"`
 	SCMStatus        string `json:"scmStatus"`
 	TerminalHandleID string `json:"terminalHandleId"`

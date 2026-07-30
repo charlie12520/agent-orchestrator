@@ -813,6 +813,9 @@ func TestSpawn_ResolvesProjectConfig(t *testing.T) {
 	if agent.lastConfig.Model != "worker-model" {
 		t.Fatalf("launch model = %q, want role override worker-model", agent.lastConfig.Model)
 	}
+	if rec.Metadata.AgentConfig == nil || rec.Metadata.AgentConfig.Model != "worker-model" {
+		t.Fatalf("stored agent config = %#v, want effective worker config", rec.Metadata.AgentConfig)
+	}
 	if rec.Harness != domain.HarnessCodex {
 		t.Fatalf("harness = %q, want codex from role override", rec.Harness)
 	}
@@ -835,6 +838,48 @@ func TestSpawn_ResolvesProjectConfig(t *testing.T) {
 	}
 	if !agent.lastConfig.IsZero() {
 		t.Fatalf("launch config = %#v, want zero for project without config", agent.lastConfig)
+	}
+}
+
+func TestSpawn_PerSessionAgentConfigPersistsAcrossRestore(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: domain.ProjectConfig{
+		AgentConfig: domain.AgentConfig{Model: "base-model", Permissions: domain.PermissionModeAcceptEdits},
+		Worker:      domain.RoleOverride{Harness: domain.HarnessCodex, AgentConfig: domain.AgentConfig{Model: "worker-model"}},
+	}}
+	agent := &recordingAgent{}
+	m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: func(string) (string, error) { return "/bin/true", nil }})
+	override := &domain.AgentConfig{Model: "session-model", Permissions: domain.PermissionModeAuto}
+
+	rec, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, AgentConfig: override})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := domain.AgentConfig{Model: "session-model", Permissions: domain.PermissionModeAuto}
+	if agent.lastConfig != want || rec.Metadata.AgentConfig == nil || *rec.Metadata.AgentConfig != want {
+		t.Fatalf("launch=%#v stored=%#v, want %#v", agent.lastConfig, rec.Metadata.AgentConfig, want)
+	}
+
+	// Project defaults may change after launch; this session must keep its
+	// frozen effective config when restored.
+	project := st.projects["mer"]
+	project.Config.AgentConfig = domain.AgentConfig{Model: "new-base", Permissions: domain.PermissionModeBypassPermissions}
+	project.Config.Worker.AgentConfig = domain.AgentConfig{Model: "new-worker"}
+	st.projects["mer"] = project
+	terminal := st.sessions[rec.ID]
+	terminal.IsTerminated = true
+	terminal.Metadata.AgentSessionID = "native-session"
+	st.sessions[rec.ID] = terminal
+
+	restored, err := m.RestoreWithMode(ctx, rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.lastRestore.Config != want {
+		t.Fatalf("restore config = %#v, want frozen %#v", agent.lastRestore.Config, want)
+	}
+	if restored.Session.Metadata.AgentConfig == nil || *restored.Session.Metadata.AgentConfig != want {
+		t.Fatalf("restored stored config = %#v, want %#v", restored.Session.Metadata.AgentConfig, want)
 	}
 }
 
@@ -2219,6 +2264,26 @@ func TestCleanup_ReclaimsTerminalWorkspaces(t *testing.T) {
 	}
 	if ws.destroyed != 1 {
 		t.Fatal("live workspace must not be destroyed")
+	}
+}
+
+func TestCleanupSession_ReclaimsOnlyRequestedTerminalWorkspace(t *testing.T) {
+	m, st, _, ws := newManager()
+	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
+	seedTerminal(st, "mer-2", domain.SessionMetadata{WorkspacePath: "/ws/mer-2"})
+
+	res, err := m.CleanupSession(ctx, "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Cleaned) != 1 || res.Cleaned[0] != "mer-1" || len(res.Skipped) != 0 {
+		t.Fatalf("result = %#v", res)
+	}
+	if ws.destroyed != 1 || ws.lastDestroyInfo.SessionID != "mer-1" {
+		t.Fatalf("destroyed=%d last=%#v, want only mer-1", ws.destroyed, ws.lastDestroyInfo)
+	}
+	if _, ok := st.sessions["mer-2"]; !ok {
+		t.Fatal("unrelated session was removed")
 	}
 }
 

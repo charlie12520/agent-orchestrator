@@ -21,6 +21,9 @@ type SpawnConfig struct {
 	Harness      domain.AgentHarness
 	Branch       string
 	Prompt       string
+	// AgentConfig optionally overrides the project's effective agent config for
+	// this session. Set fields win; empty fields inherit the project/role value.
+	AgentConfig *domain.AgentConfig
 
 	// DisplayName is the user-facing sidebar label. Empty falls back to the
 	// session id in the read model (e.g. orchestrator sessions).

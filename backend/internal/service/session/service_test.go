@@ -560,6 +560,7 @@ type fakeCommander struct {
 	sent            []domain.SessionID
 	sentMessages    []string
 	cleanupProjects []domain.ProjectID
+	cleanupSessions []domain.SessionID
 	killErr         error
 	retireErr       error
 	sendErr         error
@@ -629,6 +630,13 @@ func (f *fakeCommander) Cleanup(_ context.Context, project domain.ProjectID) (se
 		Skipped: []sessionmanager.CleanupSkip{{SessionID: "mer-2", Reason: "workspace has uncommitted changes"}},
 	}, nil
 }
+func (f *fakeCommander) CleanupSession(_ context.Context, id domain.SessionID) (sessionmanager.CleanupResult, error) {
+	f.cleanupSessions = append(f.cleanupSessions, id)
+	if f.cleanupErr != nil {
+		return sessionmanager.CleanupResult{}, f.cleanupErr
+	}
+	return sessionmanager.CleanupResult{Cleaned: []domain.SessionID{id}, Skipped: []sessionmanager.CleanupSkip{}}, nil
+}
 func (f *fakeCommander) RollbackSpawn(context.Context, domain.SessionID) (bool, bool, error) {
 	return false, false, nil
 }
@@ -646,6 +654,21 @@ func TestCleanupMapsManagerResult(t *testing.T) {
 	}
 	if len(out.Skipped) != 1 || out.Skipped[0].SessionID != "mer-2" || out.Skipped[0].Reason != "workspace has uncommitted changes" {
 		t.Fatalf("skipped = %#v", out.Skipped)
+	}
+}
+
+func TestCleanupSessionMapsManagerResult(t *testing.T) {
+	fc := &fakeCommander{}
+	svc := &Service{manager: fc}
+	out, err := svc.CleanupSession(context.Background(), "mer-7")
+	if err != nil {
+		t.Fatalf("CleanupSession: %v", err)
+	}
+	if len(out.Cleaned) != 1 || out.Cleaned[0] != "mer-7" || len(out.Skipped) != 0 {
+		t.Fatalf("out = %#v", out)
+	}
+	if len(fc.cleanupSessions) != 1 || fc.cleanupSessions[0] != "mer-7" || len(fc.cleanupProjects) != 0 {
+		t.Fatalf("single=%#v bulk=%#v", fc.cleanupSessions, fc.cleanupProjects)
 	}
 }
 

@@ -268,6 +268,9 @@ type Session struct {
 	RuntimeLaunchID    string
 	WorkspaceRepoPath  string
 	TerminateOnPRMerge bool
+	AgentConfigSet     bool
+	AgentModel         string
+	AgentPermissions   domain.PermissionMode
 }
 
 type SessionCleanupFact struct {
