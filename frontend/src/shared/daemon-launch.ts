@@ -1,3 +1,5 @@
+import path from "node:path";
+
 export type DaemonLaunchSpec = {
 	command: string;
 	args: string[];
@@ -104,11 +106,10 @@ function configuredArgv(env: Record<string, string | undefined>, platform: NodeJ
 
 export function isDirectAoExecutable(value: string, platform: NodeJS.Platform): boolean {
 	if (CONTROL_CHARACTER.test(value)) return false;
-	const normalized = value.replace(/\\/g, "/");
-	const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
-	return platform === "win32"
-		? basename.toLowerCase() === "ao" || basename.toLowerCase() === "ao.exe"
-		: basename === "ao";
+	const basename = platform === "win32" ? path.win32.basename(value) : path.posix.basename(value);
+	if (platform !== "win32") return basename === "ao";
+	if (basename.includes(":") || /[. ]$/.test(basename)) return false;
+	return basename.toLowerCase() === "ao" || basename.toLowerCase() === "ao.exe";
 }
 
 function configuredLaunch(argv: string[], cwd: string, platform: NodeJS.Platform): DaemonLaunchSpec | null {

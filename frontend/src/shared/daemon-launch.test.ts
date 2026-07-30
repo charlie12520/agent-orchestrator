@@ -1,5 +1,10 @@
+// @vitest-environment node
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { parseConfiguredDaemonCommand, resolveDaemonLaunch } from "./daemon-launch";
+import { isDirectAoExecutable, parseConfiguredDaemonCommand, resolveDaemonLaunch } from "./daemon-launch";
 
 function configured(env: Record<string, string | undefined>, platform: NodeJS.Platform = "darwin") {
 	return resolveDaemonLaunch(env, false, "/resources", "/app", "/home/user", platform);
@@ -139,6 +144,53 @@ describe("resolveDaemonLaunch", () => {
 		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(["C:\\opt\\not-ao.exe", "daemon"]) }, "win32")).toBeNull();
 		expect(configured({ AO_DAEMON_ARGV: JSON.stringify(["AO.EXE", "daemon"]) }, "win32")).not.toBeNull();
 	});
+
+	it.each([
+		["POSIX bare", "ao", "linux", true],
+		["POSIX absolute", "/opt/agent-orchestrator/ao", "darwin", true],
+		["POSIX uppercase", "/opt/agent-orchestrator/AO", "linux", false],
+		["POSIX exe suffix", "/opt/agent-orchestrator/ao.exe", "linux", false],
+		["POSIX literal backslash", "/tmp/renamed-wrapper\\ao", "linux", false],
+		["POSIX Windows-looking path", "C:\\tools\\ao", "linux", false],
+		["Windows bare", "ao", "win32", true],
+		["Windows exe", "C:\\tools\\ao.exe", "win32", true],
+		["Windows forward slash", "C:/tools/ao.exe", "win32", true],
+		["Windows case-insensitive", "C:\\tools\\AO.EXE", "win32", true],
+		["Windows ADS", "C:\\tools\\ao.exe:payload", "win32", false],
+		["Windows trailing dot", "C:\\tools\\ao.exe.", "win32", false],
+		["Windows trailing space", "C:\\tools\\ao.exe ", "win32", false],
+		["Windows renamed", "C:\\tools\\renamed-ao.exe", "win32", false],
+	] as const)("applies native basename semantics for %s", (_name, executable, platform, accepted) => {
+		expect(isDirectAoExecutable(executable, platform)).toBe(accepted);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"rejects a live POSIX executable whose literal backslash filename only appears to end in /ao",
+		() => {
+			const directory = mkdtempSync(join(tmpdir(), "ao-posix-backslash-"));
+			try {
+				const sentinelPath = join(directory, "executed");
+				const executable = join(directory, "renamed-wrapper\\ao");
+				writeFileSync(
+					executable,
+					`#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(sentinelPath)}, "ran");\n`,
+					"utf8",
+				);
+				chmodSync(executable, 0o755);
+				const live = spawnSync(executable, ["daemon"], { encoding: "utf8", shell: false });
+				expect(live.status).toBe(0);
+				expect(existsSync(sentinelPath)).toBe(true);
+				rmSync(sentinelPath);
+
+				const launch = configured({ AO_DAEMON_ARGV: JSON.stringify([executable, "daemon"]) }, process.platform);
+				if (launch) spawnSync(launch.command, launch.args, { cwd: launch.cwd, shell: launch.shell });
+				expect(launch).toBeNull();
+				expect(existsSync(sentinelPath)).toBe(false);
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it.each([
 		["empty array", "[]"],

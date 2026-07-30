@@ -148,9 +148,12 @@ followed immediately by one literal `daemon` element and the daemon arguments:
 ```
 
 The executable basename must be `ao` (`ao` or `ao.exe` on Windows). The desktop
-parses the array once into one executable/argv object. The actual launch uses
-that exact executable with arguments beginning `daemon`; preflight uses the
-same executable with exactly `version --json`. Both processes use
+evaluates that basename with platform-native path rules: a backslash is an
+ordinary filename character on POSIX, while Windows alternate-data-stream
+suffixes and trailing dots/spaces are rejected. The desktop parses the array
+once into one executable/argv object. The actual launch uses that exact
+executable with arguments beginning `daemon`; preflight uses the same executable
+with exactly `version --json`. Both processes use
 `shell:false`; JSON daemon-argument values such as spaces, `$()`, `%PATH%`,
 `!PATH!`, or `*` are therefore literal argv and are never expanded. Empty or
 non-string elements, controls including NUL, a missing or duplicate `daemon`,
