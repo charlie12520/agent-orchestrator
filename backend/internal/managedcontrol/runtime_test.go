@@ -29,7 +29,9 @@ func TestLoadAcceptsManagedBootstrap(t *testing.T) {
 	if runtime.MatchesBearerHex(testSecretHex + " ") {
 		t.Fatal("whitespace-normalized bearer matched")
 	}
-	if !runtime.Attestation().Capabilities["authenticatedIpc"] || !runtime.Attestation().Capabilities["daemonControlGeneration"] {
+	if !runtime.Attestation().Capabilities["authenticatedIpc"] ||
+		!runtime.Attestation().Capabilities["daemonControlGeneration"] ||
+		!runtime.Attestation().Capabilities["managedMobileLANDisabled"] {
 		t.Fatalf("managed attestation = %+v", runtime.Attestation())
 	}
 }

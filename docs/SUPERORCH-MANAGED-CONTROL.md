@@ -6,9 +6,9 @@ What it does now:
 
 - reads a versioned bootstrap envelope from inherited stdin before config loading, database work, or runtime/session startup
 - keeps the 256-bit root secret memory-only and uses it only for the primary loopback daemon surface
-- exposes truthful runtime attestation only after a successful managed bootstrap
+- exposes truthful runtime attestation only after a successful managed bootstrap; that runtime-only overlay sets `managedMobileLANDisabled: true`
 - requires exactly one semantically canonical `Authorization: Bearer <64-lowercase-hex>` header plus exactly one semantically canonical `X-AO-Daemon-Generation: <generation>` header on the primary loopback daemon surface, except literal public `GET`/`HEAD` on `/healthz` and `/readyz` with no encoded alias and no query string
-- keeps the optional LAN/mobile listener on its existing password boundary and explicitly prevents it from consuming the SuperOrch managed credential
+- only after `ao daemon --superorch-managed` validates the inherited bootstrap, entirely disables Connect Mobile LAN construction, restoration, and control: AO does not construct `LANManager`, does not read or restore persisted enabled mobile state, reports mobile status as disabled, and rejects enable, disable, and regenerate without mutation
 
 What it does not claim yet:
 
@@ -17,6 +17,7 @@ What it does not claim yet:
 - restricted-worker or token-isolated child execution
 - durable mutation journals or full session mutation generation fencing
 - secret persistence, recovery journals, or restart-to-restart control credential rotation beyond the new daemon generation
+- proof that every other listener owned by the AO process is loopback-only; `managedMobileLANDisabled` attests only that AO's Connect Mobile LAN listener cannot be constructed, restored, or controlled in this validated managed launch
 
 Threat boundary:
 

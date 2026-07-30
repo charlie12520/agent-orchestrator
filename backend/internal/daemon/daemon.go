@@ -226,17 +226,10 @@ func RunWithOptions(opts RunOptions) error {
 		}
 	}()
 
-	// Connect Mobile: the bridge service needs the LAN listener, but the LAN
-	// listener needs the built router's handler, which only exists once srv is
-	// constructed — and srv's router mounts the mobile controller, which needs
-	// the bridge service. Break the cycle with late binding: build bs with LAN
-	// left nil, hand its controller into NewWithDeps, then once srv exists,
-	// build the LAN listener over srv.Handler() and assign it onto bs.LAN.
-	bs := &controllers.BridgeService{
-		ConfigPath:  mobilebridge.Path(cfg.DataDir),
-		DefaultPort: mobilebridge.DefaultPort,
-	}
-	mc := &controllers.MobileController{Bridge: bs}
+	// Connect Mobile normally uses late binding because its LAN listener shares
+	// the built router. Managed mode instead receives a controller with no bridge
+	// service, so it cannot construct, restore, or start a LAN listener.
+	mobile := newMobileWiring(cfg.DataDir, managedRuntime != nil)
 	browserService := browsersvc.New(sessionSvc, browserBroker, browserAuthority)
 
 	// Standalone shell terminals: user-opened shells with no agent session
@@ -288,7 +281,7 @@ func RunWithOptions(opts RunOptions) error {
 		Events:             cdcPipe.Broadcaster,
 		Activity:           lcStack.LCM,
 		Telemetry:          telemetrySink,
-		Mobile:             mc,
+		Mobile:             mobile.controller,
 		DevImport: devimportsvc.New(devimportsvc.Deps{
 			Store:         store,
 			TargetDataDir: cfg.DataDir,
@@ -325,17 +318,11 @@ func RunWithOptions(opts RunOptions) error {
 		}()
 	}
 
-	// Late-bind: the LAN listener shares the exact loopback router instance so
-	// the LAN surface and loopback surface never drift apart.
-	lan := httpd.NewMobileLAN(srv.Handler(), mobilebridge.DefaultPort, log)
-	bs.LAN = lan
-
-	// Restore Connect Mobile across a daemon restart: if the bridge was left
-	// enabled, re-arm the listener on its last port with the same password
-	// hash so an already-paired phone keeps working with no new password.
-	// Best-effort: never blocks boot.
-	if err := restoreMobileOnBoot(mobilebridge.Path(cfg.DataDir), lan); err != nil {
-		log.Warn("restore mobile bridge on boot failed", "err", err)
+	// Standalone AO late-binds and restores Connect Mobile. Managed mode returns
+	// nil before constructing LANManager, regardless of persisted mobile state.
+	lan, mobileRestoreErr := mobile.attach(srv.Handler(), log, httpd.NewMobileLAN)
+	if mobileRestoreErr != nil {
+		log.Warn("restore mobile bridge on boot failed", "err", mobileRestoreErr)
 	}
 
 	// Reconcile sessions on boot: adopt crash-surviving runtimes, capture and
@@ -382,10 +369,12 @@ func RunWithOptions(opts RunOptions) error {
 	managedPreview.Close()
 	<-previewDone
 	lcStack.Stop()
-	lanStopCtx, lanCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer lanCancel()
-	if err := lan.Stop(lanStopCtx); err != nil {
-		log.Error("mobile LAN listener shutdown", "err", err)
+	if lan != nil {
+		lanStopCtx, lanCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer lanCancel()
+		if err := lan.Stop(lanStopCtx); err != nil {
+			log.Error("mobile LAN listener shutdown", "err", err)
+		}
 	}
 	if err := cdcPipe.Stop(); err != nil {
 		log.Error("cdc pipeline shutdown", "err", err)

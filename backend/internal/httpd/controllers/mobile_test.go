@@ -86,3 +86,50 @@ func TestMobileEnableReturnsPassword(t *testing.T) {
 		t.Fatalf("bad response: %+v", got)
 	}
 }
+
+func TestManagedDisabledMobileBridgeFailsClosed(t *testing.T) {
+	c := &MobileController{Bridge: &ManagedDisabledMobileBridge{}}
+
+	status := httptest.NewRecorder()
+	c.Status(status, httptest.NewRequest(http.MethodGet, "/api/v1/mobile/status", nil))
+	if status.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", status.Code)
+	}
+	var gotStatus MobileStatusResponse
+	if err := json.NewDecoder(status.Body).Decode(&gotStatus); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if gotStatus.Enabled || gotStatus.Host != "" || gotStatus.Port != 0 || gotStatus.Password != "" {
+		t.Fatalf("managed mobile status exposed active connection state: %+v", gotStatus)
+	}
+
+	tests := []struct {
+		name   string
+		path   string
+		invoke func(http.ResponseWriter, *http.Request)
+	}{
+		{name: "enable", path: "/api/v1/mobile/enable", invoke: c.Enable},
+		{name: "disable", path: "/api/v1/mobile/disable", invoke: c.Disable},
+		{name: "regenerate", path: "/api/v1/mobile/regenerate", invoke: c.Regenerate},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			tc.invoke(w, httptest.NewRequest(http.MethodPost, tc.path, nil))
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", w.Code)
+			}
+			var got struct {
+				Error   string `json:"error"`
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+				t.Fatalf("decode error: %v", err)
+			}
+			if got.Error != "forbidden" || got.Code != "MOBILE_DISABLED_MANAGED" || got.Message != managedMobileDisabledMessage {
+				t.Fatalf("error = %+v", got)
+			}
+		})
+	}
+}
