@@ -137,6 +137,35 @@ app additionally parses `ao.attestation.json` beside the executable and
 requires the sidecar and live binary output to match exactly before spawn. Both
 remain self-reported compatibility records, not authenticated provenance.
 
+### Configured daemon argv
+
+`AO_DAEMON_ARGV` is the preferred configured-launch contract. Its value is a
+compact JSON array of non-empty strings containing the executable, any wrapper
+prefix, exactly one literal `daemon` element, and the daemon arguments:
+
+```json
+["C:\\Program Files\\AO\\ao.exe", "daemon", "--port", "4317"]
+```
+
+The desktop parses that array once into one executable/argv object. The actual
+launch uses the complete object. The preflight uses the same executable and the
+same argv prefix before `daemon`, replacing only `daemon` and its following
+arguments with `version --json`. Both processes use `shell:false`; JSON values
+such as spaces, `$()`, `%PATH%`, `!PATH!`, or `*` are therefore literal argv and
+are never expanded. Empty or non-string elements, controls including NUL, a
+missing or duplicate `daemon`, and explicit shell-interpreter prefixes are
+rejected.
+
+`AO_DAEMON_COMMAND` remains only as a fail-closed migration path. It is no
+longer executed as a shell command. Its deliberately narrow compatibility
+grammar accepts ASCII-space-separated argv, double-quoted paths on every
+platform, single-quoted paths only on POSIX, and POSIX backslash escaping. It
+rejects tabs/newlines and other controls, shell interpreters, expansions,
+substitutions, pipes/redirections, globs, metacharacters, unmatched or
+concatenated quotes, and a missing or duplicate literal `daemon`. Existing
+values that relied on shell behavior are intentionally incompatible and must
+move to `AO_DAEMON_ARGV`; the app rejects them before preflight or spawn.
+
 Daemon startup validates only attestation/build self-consistency. It does not
 require future integration capabilities to be true. The consuming adapter
 chooses a required-capability set for its operation (for example, observe-only

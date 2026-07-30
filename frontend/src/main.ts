@@ -780,9 +780,10 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	);
 	if (!launch) {
 		setDaemonStatus({
-			state: "stopped",
-			message: "AO_DAEMON_COMMAND is not configured; renderer uses loopback REST when available.",
-			code: "not_configured",
+			state: "error",
+			message:
+				"AO daemon configuration was rejected. Set AO_DAEMON_ARGV to a JSON string array containing one literal daemon subcommand, or migrate the legacy AO_DAEMON_COMMAND value to its strict argv grammar.",
+			code: "spawn_failed",
 		});
 		return daemonStatus;
 	}
@@ -948,10 +949,10 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	// on THIS process. Without this, a stale exit from an already-stopped daemon
 	// could null out a newer daemonProcess started in the meantime, orphaning it.
 	//
-	// `detached` makes the child its own process-group leader. Because shell:true
-	// runs the command through /bin/sh, a plain kill() would only signal the shell
-	// wrapper and orphan the real daemon (which keeps holding the port). Killing
-	// the whole group via killDaemon() reaches the daemon and any PTY children.
+	// `detached` makes the directly spawned executable its own process-group
+	// leader. Configured launches are resolved to executable+argv and use
+	// shell:false, so preflight and launch cannot diverge through a shell wrapper.
+	// Killing the whole group via killDaemon() also reaches any PTY children.
 	//
 	// AO_KEEP_DAEMON: the daemon must survive this app, so it cannot inherit
 	// Electron-owned stdout/stderr pipes — when Electron exits, the pipe read

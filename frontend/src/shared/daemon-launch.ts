@@ -2,76 +2,150 @@ export type DaemonLaunchSpec = {
 	command: string;
 	args: string[];
 	cwd: string;
-	shell: boolean;
+	shell: false;
 	source: "configured" | "bundled" | "dev";
-	/** Non-mutating shell command derived from AO_DAEMON_COMMAND for preflight. */
-	preflightCommand?: string;
+	/** Index of the literal `daemon` subcommand in `args` for a configured launch. */
+	configuredDaemonArgIndex?: number;
 };
 
-type ShellToken = { value: string; start: number; end: number };
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+const COMPATIBILITY_SHELL_SYNTAX = /[|&;<>()$`%!*?\[\]{}#~^]/;
+const SHELL_INTERPRETERS = new Set([
+	"bash",
+	"bash.exe",
+	"cmd",
+	"cmd.exe",
+	"command.com",
+	"csh",
+	"dash",
+	"fish",
+	"ksh",
+	"nu",
+	"powershell",
+	"powershell.exe",
+	"powershell_ise.exe",
+	"pwsh",
+	"pwsh.exe",
+	"sh",
+	"sh.exe",
+	"tcsh",
+	"wsl",
+	"wsl.exe",
+	"zsh",
+]);
+
+type ConfiguredArgvResolution = { present: false } | { present: true; argv: string[] | null };
 
 /**
- * Replace the configured AO `daemon` subcommand with `version --json` while
- * preserving the exact executable/prefix quoting used for the actual launch.
- * Complex shell pipelines/redirections are refused instead of partially
- * executing during preflight.
+ * Parse the legacy AO_DAEMON_COMMAND compatibility grammar. This is
+ * deliberately narrower than a shell: ASCII spaces separate arguments,
+ * quoted paths are supported, and no expansion/control syntax is accepted.
+ * The resulting argv is used directly with shell:false and is never reparsed.
  */
-export function configuredDaemonPreflightCommand(command: string, platform: NodeJS.Platform): string | null {
-	const tokens = tokenizeConfiguredCommand(command, platform);
-	if (!tokens) return null;
-	const daemon = tokens.find((token, index) => index > 0 && token.value === "daemon");
-	if (!daemon) return null;
-	return `${command.slice(0, daemon.start).trimEnd()} version --json`;
+export function parseConfiguredDaemonCommand(command: string, platform: NodeJS.Platform): string[] | null {
+	if (!command || CONTROL_CHARACTER.test(command) || COMPATIBILITY_SHELL_SYNTAX.test(command)) return null;
+
+	const argv: string[] = [];
+	let index = 0;
+	while (index < command.length) {
+		while (command[index] === " ") index += 1;
+		if (index >= command.length) break;
+
+		let value = "";
+		const openingQuote = command[index];
+		if (openingQuote === '"' || openingQuote === "'") {
+			if (openingQuote === "'" && platform === "win32") return null;
+			index += 1;
+			let closed = false;
+			while (index < command.length) {
+				const char = command[index];
+				if (char === openingQuote) {
+					closed = true;
+					index += 1;
+					break;
+				}
+				if (openingQuote === '"' && char === "\\" && platform !== "win32") {
+					const next = command[index + 1];
+					if (next === '"' || next === "\\") {
+						value += next;
+						index += 2;
+						continue;
+					}
+					value += "\\";
+					index += 1;
+					continue;
+				}
+				if (openingQuote === '"' && char === "\\" && platform === "win32" && command[index + 1] === '"') {
+					return null;
+				}
+				value += char;
+				index += 1;
+			}
+			if (!closed || (index < command.length && command[index] !== " ")) return null;
+		} else {
+			while (index < command.length && command[index] !== " ") {
+				const char = command[index];
+				if (char === '"' || char === "'") return null;
+				if (char === "\\" && platform !== "win32") {
+					if (index + 1 >= command.length) return null;
+					value += command[index + 1];
+					index += 2;
+					continue;
+				}
+				value += char;
+				index += 1;
+			}
+		}
+		if (!value) return null;
+		argv.push(value);
+	}
+	return argv.length > 0 ? argv : null;
 }
 
-function tokenizeConfiguredCommand(command: string, platform: NodeJS.Platform): ShellToken[] | null {
-	const tokens: ShellToken[] = [];
-	let start = -1;
-	let value = "";
-	let quote: '"' | "'" | null = null;
-
-	const finish = (end: number) => {
-		if (start < 0) return;
-		tokens.push({ value, start, end });
-		start = -1;
-		value = "";
-	};
-
-	for (let index = 0; index < command.length; index += 1) {
-		const char = command[index];
-		if (quote) {
-			if (char === quote) {
-				quote = null;
-				continue;
-			}
-			if (char === "\\" && quote === '"' && platform !== "win32" && index + 1 < command.length) {
-				value += command[++index];
-				continue;
-			}
-			value += char;
-			continue;
-		}
-		if (/\s/.test(char)) {
-			finish(index);
-			continue;
-		}
-		if (char === '"' || char === "'") {
-			if (start < 0) start = index;
-			quote = char;
-			continue;
-		}
-		if ("|&;<>".includes(char)) return null;
-		if (char === "\\" && platform !== "win32" && index + 1 < command.length) {
-			if (start < 0) start = index;
-			value += command[++index];
-			continue;
-		}
-		if (start < 0) start = index;
-		value += char;
+function parseConfiguredDaemonJson(raw: string): string[] | null {
+	if (!raw || CONTROL_CHARACTER.test(raw)) return null;
+	let value: unknown;
+	try {
+		value = JSON.parse(raw);
+	} catch {
+		return null;
 	}
-	if (quote) return null;
-	finish(command.length);
-	return tokens;
+	if (!Array.isArray(value) || value.length < 2) return null;
+	if (value.some((entry) => typeof entry !== "string" || entry.length === 0 || CONTROL_CHARACTER.test(entry))) {
+		return null;
+	}
+	return value as string[];
+}
+
+function configuredArgv(env: Record<string, string | undefined>, platform: NodeJS.Platform): ConfiguredArgvResolution {
+	if (env.AO_DAEMON_ARGV !== undefined) {
+		return { present: true, argv: parseConfiguredDaemonJson(env.AO_DAEMON_ARGV) };
+	}
+	if (env.AO_DAEMON_COMMAND !== undefined) {
+		return { present: true, argv: parseConfiguredDaemonCommand(env.AO_DAEMON_COMMAND, platform) };
+	}
+	return { present: false };
+}
+
+function shellInterpreter(value: string): boolean {
+	const normalized = value.replace(/\\/g, "/");
+	return SHELL_INTERPRETERS.has(normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase());
+}
+
+function configuredLaunch(argv: string[], cwd: string): DaemonLaunchSpec | null {
+	if (!argv[0] || argv[0].trim().length === 0) return null;
+	const daemonIndexes = argv.flatMap((value, index) => (value === "daemon" ? [index] : []));
+	if (daemonIndexes.length !== 1 || daemonIndexes[0] === 0) return null;
+	const daemonIndex = daemonIndexes[0];
+	if (argv.slice(0, daemonIndex).some(shellInterpreter)) return null;
+	return {
+		command: argv[0],
+		args: argv.slice(1),
+		cwd,
+		shell: false,
+		source: "configured",
+		configuredDaemonArgIndex: daemonIndex - 1,
+	};
 }
 
 function joinPath(...segments: string[]): string {
@@ -90,17 +164,9 @@ export function resolveDaemonLaunch(
 	homeDir: string,
 	platform: NodeJS.Platform,
 ): DaemonLaunchSpec | null {
-	const configuredCommand = env.AO_DAEMON_COMMAND?.trim();
-	if (configuredCommand) {
-		const preflightCommand = configuredDaemonPreflightCommand(configuredCommand, platform);
-		return {
-			command: configuredCommand,
-			args: [],
-			cwd: appPath,
-			shell: true,
-			source: "configured",
-			...(preflightCommand ? { preflightCommand } : {}),
-		};
+	const configured = configuredArgv(env, platform);
+	if (configured.present) {
+		return configured.argv ? configuredLaunch(configured.argv, appPath) : null;
 	}
 
 	if (!isPackaged) {

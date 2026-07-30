@@ -166,6 +166,12 @@ npm run make           # Create distributables when platform packaging deps are 
 the bundled daemon with release attestation before Electron Forge runs. Ordinary
 `npm run dev` startup continues to build a development-attested daemon.
 
+For an external daemon executable, prefer `AO_DAEMON_ARGV` with a compact JSON
+string array such as `["C:\\Program Files\\AO\\ao.exe","daemon"]`.
+`AO_DAEMON_COMMAND` is a strict, shell-free compatibility parser and no longer
+supports expansion, pipelines, redirection, globs, control characters, or shell
+wrappers. Migrate any value that relied on shell behavior to JSON argv.
+
 On a fresh Linux machine, treat `npm run package` as the default local build
 path. `npm run make` also needs Linux packaging tools that are not provided by a
 minimal setup or by `nix develop` today:
