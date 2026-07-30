@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { buildLdflags, validateBuildInputs, validateBuiltAttestation } from "./build-attestation.mjs";
+import { resolveBuildProvenance } from "./build-provenance.mjs";
 import { meetsMinimumVersion, parseGoVersion, parseMinimumGoVersion } from "./go-version.mjs";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
@@ -15,20 +16,18 @@ const manifestPath = join(outDir, "ao.attestation.json");
 const minimumGoVersion = parseMinimumGoVersion(readFileSync(join(backendRoot, "go.mod"), "utf8"));
 
 const packageVersion = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8")).version;
-const commitResult = process.env.AO_FORK_COMMIT
-	? { status: 0, stdout: process.env.AO_FORK_COMMIT }
-	: spawnSync("git", ["rev-parse", "HEAD"], {
-			cwd: repoRoot,
-			encoding: "utf8",
-		});
-if (commitResult.status !== 0 || !commitResult.stdout) {
-	console.error("Could not resolve the AO fork commit; set AO_FORK_COMMIT to a full lowercase SHA.");
+const buildMode = process.env.AO_BUILD_MODE ?? (process.env.CI ? "release" : "development");
+let forkCommit;
+try {
+	forkCommit = resolveBuildProvenance({ repoRoot, mode: buildMode });
+} catch (error) {
+	console.error(error instanceof Error ? error.message : String(error));
 	process.exit(1);
 }
 const buildMetadata = {
 	version: process.env.AO_BUILD_VERSION ?? packageVersion,
-	commit: commitResult.stdout.trim().toLowerCase(),
-	mode: process.env.AO_BUILD_MODE ?? (process.env.CI ? "release" : "development"),
+	commit: forkCommit,
+	mode: buildMode,
 };
 try {
 	validateBuildInputs(buildMetadata);

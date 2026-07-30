@@ -50,6 +50,9 @@ func TestPRsRoutes_NilService_MergeReturns501(t *testing.T) {
 }
 
 func TestPRsRoutes_NilService_ResolveCommentsReturns501(t *testing.T) {
+	if daemonmeta.Current().Capabilities["prResolveComments"] {
+		t.Fatal("prResolveComments attested true while the production controller is a 501 placeholder")
+	}
 	srv := newPRTestServer(t, nil)
 	body, status, headers := doRequest(t, srv, "POST", "/api/v1/prs/1/resolve-comments", "")
 	assertJSON(t, headers)

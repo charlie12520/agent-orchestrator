@@ -16,8 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BACKEND_DIR="${REPO_ROOT}/backend"
 BUILD_VERSION="${AO_BUILD_VERSION:-$(cd "${REPO_ROOT}" && node -p "require('./frontend/package.json').version")}"
-FORK_COMMIT="${AO_FORK_COMMIT:-$(git -C "${REPO_ROOT}" rev-parse HEAD)}"
 BUILD_MODE="${AO_BUILD_MODE:-release}"
+FORK_COMMIT="$(AO_BUILD_MODE="${BUILD_MODE}" node "${REPO_ROOT}/frontend/scripts/build-provenance.mjs")"
 
 if [[ "${BUILD_VERSION}" =~ ^(dev|development|unknown)$ || ! "${BUILD_VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
   printf 'AO_BUILD_VERSION must be explicit and linker-safe, got %s\n' "${BUILD_VERSION}" >&2

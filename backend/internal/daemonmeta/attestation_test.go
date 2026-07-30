@@ -33,7 +33,7 @@ func TestCurrentAttestationPinsEveryCompatibilityBoundary(t *testing.T) {
 	}
 	for _, capability := range []string{
 		"authenticatedGuardian", "authenticatedIpc", "authenticatedWatchdog", "durableEventReplay",
-		"durableMutationJournal", "generationFencing", "globalSupervisor", "omp", "prMerge",
+		"durableMutationJournal", "generationFencing", "globalSupervisor", "omp", "prMerge", "prResolveComments",
 		"restrictedWorkerIsolation", "sessionInterrupt",
 	} {
 		if att.Capabilities[capability] {

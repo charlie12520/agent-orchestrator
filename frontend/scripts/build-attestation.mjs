@@ -37,6 +37,7 @@ export const EXPECTED_ATTESTATION = Object.freeze({
 		prClaim: true,
 		prMerge: false,
 		prPreview: true,
+		prResolveComments: false,
 		restApi: true,
 		reviews: true,
 		restrictedWorkerIsolation: false,

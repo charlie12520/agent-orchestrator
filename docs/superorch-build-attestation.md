@@ -9,6 +9,9 @@ The official upstream baseline is pinned to commit
 `9f26112a0194d8ed86722ebb97115cbc678e4f38` from
 `https://github.com/Untrivial-ai/agent-orchestrator`. A fork build additionally
 identifies its own exact version, full lowercase commit SHA, and build mode.
+This is self-reported compatibility identity. It is not authenticated source
+provenance, an artifact signature, a transparency-log claim, or SBOM
+verification; release distribution must provide those guarantees separately.
 
 ## Contract
 
@@ -57,6 +60,7 @@ identifies its own exact version, full lowercase commit SHA, and build mode.
 		"prClaim": true,
 		"prMerge": false,
 		"prPreview": true,
+		"prResolveComments": false,
 		"restApi": true,
 		"reviews": true,
 		"restrictedWorkerIsolation": false,
@@ -87,7 +91,11 @@ route declarations or an aspirational API. `sessionInterrupt` is false because
 AO exposes termination, resume, rollback, send, and raw terminal input but no
 dedicated session interrupt operation. `prMerge` is false because the pinned
 controller is a `501 Not Implemented` placeholder; the presence of its route is
-not a capability. `prPreview` denotes AO's managed session preview controls and
+not a capability. `prResolveComments` is false for the same reason: production
+daemon wiring omits the PR action service, so the resolve-comments route is also
+a `501 Not Implemented` placeholder. `reviews` is narrowly the implemented
+review observation and review-run workflow; it does not imply comment
+resolution. `prPreview` denotes AO's managed session preview controls and
 `prClaim` denotes its native PR ownership endpoint.
 
 The hardened SuperOrch guarantees are also explicitly false: authenticated
@@ -110,11 +118,24 @@ neighboring route, table, or transport.
 - `frontend/daemon/ao.attestation.json` is emitted beside a bundled daemon and
   is validated against the binary immediately after compilation.
 
-The desktop attach path validates the runfile before probing the daemon, then
-validates both probes and requires all three surfaces to identify the same fork
-build. A legacy upstream daemon, an incompatible fork, or a stale runfile is an
-explicit `compatibility_mismatch`; it is never treated as permission to spawn
-over or replace that process.
+The runfile attach path validates the runfile before API use, then validates
+health and readiness and requires all three surfaces to identify the same fork
+build and PID. When no usable runfile exists, the direct-port attach path uses
+health and readiness only and requires those two live surfaces to agree. A
+legacy upstream daemon or incompatible fork is an explicit
+`compatibility_mismatch`; it is never treated as permission to spawn over or
+replace that process.
+
+On a fresh desktop spawn, stdout's listen line and a new runfile are discovery
+signals only. The app does not report `ready` until compatible health and
+readiness probes agree; runfile discovery additionally requires the runfile PID
+and build to agree with both probes. Bundled, development, and configured
+candidates are also inspected with the non-mutating `version --json` command
+before the daemon can create or migrate its storage. A configured command that
+cannot support that probe is refused before spawn. For bundled releases, the
+app additionally parses `ao.attestation.json` beside the executable and
+requires the sidecar and live binary output to match exactly before spawn. Both
+remain self-reported compatibility records, not authenticated provenance.
 
 Daemon startup validates only attestation/build self-consistency. It does not
 require future integration capabilities to be true. The consuming adapter
@@ -129,6 +150,15 @@ commit, and mode `release`. `dev`, `development`, `unknown`, a short SHA, or a
 missing stamp makes daemon startup fail before config loading or database
 migration. Direct `go build` remains available for local work and is
 unambiguously attested as version `dev`, commit `unknown`, mode `development`.
+
+When Git metadata exists, every build script derives the commit from `HEAD`,
+requires any `AO_FORK_COMMIT` override to equal that exact checkout, and refuses
+a release while any tracked change or unignored untracked checkout content is
+dirty. This global gate avoids silently omitting root build inputs from an allowlist. A source
+archive has no checkout to compare, so it requires both a full `AO_FORK_COMMIT` and
+`AO_ARCHIVE_PROVENANCE_VERIFIED=1`; that flag is the caller's assertion that it
+verified the archive commit through external release provenance, not proof
+created by this attestation.
 
 The Electron daemon build uses `-trimpath -buildvcs=false` and deterministic
 linker values, executes `ao version --json`, validates the result, and only then

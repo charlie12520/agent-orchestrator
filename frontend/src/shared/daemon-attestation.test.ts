@@ -56,6 +56,7 @@ describe("daemon compatibility attestation", () => {
 			"globalSupervisor",
 			"omp",
 			"prMerge",
+			"prResolveComments",
 			"restrictedWorkerIsolation",
 			"sessionInterrupt",
 		]) {

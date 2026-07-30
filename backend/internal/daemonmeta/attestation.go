@@ -133,6 +133,7 @@ func Current() Attestation {
 			"prClaim":                    true,
 			"prMerge":                    false,
 			"prPreview":                  true,
+			"prResolveComments":          false,
 			"restApi":                    true,
 			"reviews":                    true,
 			"restrictedWorkerIsolation":  false,

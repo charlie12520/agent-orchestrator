@@ -69,6 +69,17 @@ describe("daemon build attestation", () => {
 				attestation({
 					capabilities: {
 						...attestation().capabilities,
+						prResolveComments: true,
+					},
+				}),
+				build,
+			),
+		).toThrow();
+		expect(() =>
+			validateBuiltAttestation(
+				attestation({
+					capabilities: {
+						...attestation().capabilities,
 						prMerge: true,
 					},
 				}),

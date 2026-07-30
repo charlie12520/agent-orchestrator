@@ -91,8 +91,8 @@ goexe="$(go env GOEXE)"
 binary_name="ao${goexe}"
 binary_path="${build_dir}/${binary_name}"
 build_version="${AO_BUILD_VERSION:-$(cd "${repo_root}" && node -p "require('./frontend/package.json').version")}"
-fork_commit="${AO_FORK_COMMIT:-$(git -C "${repo_root}" rev-parse HEAD)}"
 build_mode="${AO_BUILD_MODE:-development}"
+fork_commit="$(AO_BUILD_MODE="${build_mode}" node "${repo_root}/frontend/scripts/build-provenance.mjs")"
 
 if [[ "${build_version}" =~ ^(dev|development|unknown)$ || ! "${build_version}" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
   printf 'AO_BUILD_VERSION must be explicit and linker-safe, got %s\n' "${build_version}" >&2
