@@ -79,6 +79,8 @@ func Build() ([]byte, error) {
 			"Connect Mobile LAN bridge control (loopback/desktop only)"),
 		*(&openapi31.Tag{Name: "browser"}).WithDescription(
 			"Target-isolated desktop browser runtime (loopback only)"),
+		*(&openapi31.Tag{Name: "integration"}).WithDescription(
+			"Root-authenticated deterministic integration leases and brokered merges"),
 	}
 
 	for _, op := range operations() {
@@ -134,14 +136,19 @@ var schemaNames = map[string]string{
 	// httpd/envelope
 	"EnvelopeAPIError": "APIError",
 	// domain
-	"DomainProjectID":           "ProjectID",
-	"DomainSessionID":           "SessionID",
-	"DomainIssueID":             "IssueID",
-	"DomainSession":             "Session",
-	"DomainProjectConfig":       "ProjectConfig",
-	"DomainTrackerIntakeConfig": "TrackerIntakeConfig",
-	"DomainAgentConfig":         "AgentConfig",
-	"DomainRoleOverride":        "RoleOverride",
+	"DomainProjectID":                 "ProjectID",
+	"DomainSessionID":                 "SessionID",
+	"DomainIssueID":                   "IssueID",
+	"DomainSession":                   "Session",
+	"DomainProjectConfig":             "ProjectConfig",
+	"DomainTrackerIntakeConfig":       "TrackerIntakeConfig",
+	"DomainAgentConfig":               "AgentConfig",
+	"DomainRoleOverride":              "RoleOverride",
+	"DomainIntegrationCheckPolicy":    "IntegrationCheckPolicy",
+	"DomainIntegrationReviewPolicy":   "IntegrationReviewPolicy",
+	"DomainIntegrationCheckEvidence":  "IntegrationCheckEvidence",
+	"DomainIntegrationReviewEvidence": "IntegrationReviewEvidence",
+	"DomainIntegrationMergeOutcome":   "IntegrationMergeOutcome",
 	// httpd/controllers (wire envelopes)
 	"ControllersListProjectsResponse":             "ListProjectsResponse",
 	"ControllersProjectResponse":                  "ProjectResponse",
@@ -220,6 +227,13 @@ var schemaNames = map[string]string{
 	"ControllersMergePRResponse":         "MergePRResponse",
 	"ControllersResolveCommentsRequest":  "ResolveCommentsRequest",
 	"ControllersResolveCommentsResponse": "ResolveCommentsResponse",
+	// httpd/controllers - hardened integration merge wire envelopes
+	"ControllersIssueIntegrationMergeLeaseRequest":   "IssueIntegrationMergeLeaseRequest",
+	"ControllersIssueIntegrationMergeLeaseResponse":  "IssueIntegrationMergeLeaseResponse",
+	"ControllersIntegrationMergeLeaseIDParam":        "IntegrationMergeLeaseIDParam",
+	"ControllersRevokeIntegrationMergeLeaseResponse": "RevokeIntegrationMergeLeaseResponse",
+	"ControllersConsumeIntegrationMergeRequest":      "ConsumeIntegrationMergeRequest",
+	"ControllersConsumeIntegrationMergeResponse":     "ConsumeIntegrationMergeResponse",
 	// httpd/controllers — review wire envelopes
 	"ControllersListReviewsResponse":   "ListReviewsResponse",
 	"ControllersReviewRunResponse":     "ReviewRunResponse",
@@ -346,7 +360,58 @@ func operations() []operation {
 	ops = append(ops, mobileOperations()...)
 	ops = append(ops, browserOperations()...)
 	ops = append(ops, shellTerminalOperations()...)
+	ops = append(ops, integrationMergeOperations()...)
 	return ops
+}
+
+func integrationMergeOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/integration/merge-leases", id: "issueIntegrationMergeLease", tag: "integration",
+			summary: "Issue one bounded, root-authenticated integration lease",
+			reqBody: controllers.IssueIntegrationMergeLeaseRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.IssueIntegrationMergeLeaseResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/integration/merge-leases/{leaseId}/revoke", id: "revokeIntegrationMergeLease", tag: "integration",
+			summary:    "Revoke an active integration lease exactly once",
+			pathParams: []any{controllers.IntegrationMergeLeaseIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.RevokeIntegrationMergeLeaseResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusGone, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/integration/merges", id: "consumeIntegrationMerge", tag: "integration",
+			summary: "Consume a lease and SHA-bound merge through the configured broker",
+			reqBody: controllers.ConsumeIntegrationMergeRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ConsumeIntegrationMergeResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusGone, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusServiceUnavailable, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func browserOperations() []operation {
@@ -1129,7 +1194,7 @@ func prOperations() []operation {
 	return []operation{
 		{
 			method: http.MethodPost, path: "/api/v1/prs/{id}/merge", id: "mergePR", tag: "prs",
-			summary:    "Squash-merge a pull request",
+			summary:    "Legacy PR merge placeholder (not the integration gate)",
 			pathParams: []any{controllers.PRIDParam{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.MergePRResponse{}},

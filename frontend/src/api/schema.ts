@@ -141,6 +141,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/integration/merge-leases": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Issue one bounded, root-authenticated integration lease */
+        post: operations["issueIntegrationMergeLease"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/merge-leases/{leaseId}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke an active integration lease exactly once */
+        post: operations["revokeIntegrationMergeLease"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/merges": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Consume a lease and SHA-bound merge through the configured broker */
+        post: operations["consumeIntegrationMerge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/mobile/disable": {
         parameters: {
             query?: never;
@@ -409,7 +460,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Squash-merge a pull request */
+        /** Legacy PR merge placeholder (not the integration gate) */
         post: operations["mergePR"];
         delete?: never;
         options?: never;
@@ -948,6 +999,15 @@ export interface components {
             ok: boolean;
             sessionId: string;
         };
+        ConsumeIntegrationMergeRequest: {
+            gateCapability: string;
+            idempotencyKey: string;
+            integrationLease: string;
+            manualApproval: boolean;
+        };
+        ConsumeIntegrationMergeResponse: {
+            outcome: components["schemas"]["IntegrationMergeOutcome"];
+        };
         ControllersSessionView: {
             activity: components["schemas"]["DomainActivity"];
             branch?: string;
@@ -1034,6 +1094,96 @@ export interface components {
         };
         InitializeRepositoryResult: {
             path: string;
+        };
+        IntegrationCheckEvidence: {
+            /** Format: date-time */
+            completedAt?: string;
+            headSha: string;
+            name: string;
+            /** @enum {string} */
+            status: "passing" | "pending" | "failing";
+        };
+        IntegrationCheckPolicy: {
+            requireAllObservedPassing: boolean;
+            requiredChecks: string[];
+            revision: string;
+        };
+        IntegrationMergeOutcome: {
+            /** Format: date-time */
+            acceptedAt: string;
+            baseBranch: string;
+            baseRepository: string;
+            checkPolicy: components["schemas"]["IntegrationCheckPolicy"];
+            checks: components["schemas"]["IntegrationCheckEvidence"][];
+            /** Format: date-time */
+            completedAt: string;
+            /** Format: date-time */
+            dispatchedAt?: string;
+            expectedHeadSha: string;
+            idempotencyKey: string;
+            mergeCommitSha?: string;
+            mergeStrategy: string;
+            prNumber: number;
+            reason?: string;
+            repository: string;
+            reviewPolicy: components["schemas"]["IntegrationReviewPolicy"];
+            reviews: components["schemas"]["IntegrationReviewEvidence"][];
+            sourceBranch: string;
+            sourceRepository: string;
+            /** @enum {string} */
+            status: "merged" | "revalidation_required" | "ambiguous";
+            unresolvedReviewThreads: number;
+            version: number;
+        };
+        IntegrationReviewEvidence: {
+            /** @enum {string} */
+            decision: "approved" | "changes_requested" | "commented" | "dismissed";
+            headSha: string;
+            reviewer: string;
+            /** Format: date-time */
+            submittedAt: string;
+        };
+        IntegrationReviewPolicy: {
+            requireResolvedThreads: boolean;
+            requiredApprovals: number;
+            requiredReviewers: string[];
+            revision: string;
+        };
+        IssueIntegrationMergeLeaseRequest: {
+            baseBranch: string;
+            baseRepository: string;
+            checkPolicy: components["schemas"]["IntegrationCheckPolicy"];
+            expectedHeadSha: string;
+            /** Format: date-time */
+            expiresAt?: string;
+            manualApprovalRequired: boolean;
+            /** @enum {string} */
+            mergeStrategy?: "squash" | "merge" | "rebase";
+            prNumber: number;
+            repository: string;
+            reviewPolicy: components["schemas"]["IntegrationReviewPolicy"];
+            sourceBranch: string;
+            sourceRepository: string;
+        };
+        IssueIntegrationMergeLeaseResponse: {
+            baseBranch: string;
+            baseRepository: string;
+            checkPolicy: components["schemas"]["IntegrationCheckPolicy"];
+            expectedHeadSha: string;
+            /** Format: date-time */
+            expiresAt: string;
+            gateCapability: string;
+            integrationLease: string;
+            /** Format: date-time */
+            issuedAt: string;
+            manualApprovalRequired: boolean;
+            mergeStrategy: string;
+            prNumber: number;
+            repository: string;
+            reviewPolicy: components["schemas"]["IntegrationReviewPolicy"];
+            sourceBranch: string;
+            sourceRepository: string;
+            version: number;
         };
         KillSessionResponse: {
             freed?: boolean;
@@ -1289,6 +1439,14 @@ export interface components {
             review: components["schemas"]["ReviewRun"];
             reviewerHandleId: string;
             reviews: components["schemas"]["ReviewRun"][];
+        };
+        RevokeIntegrationMergeLeaseResponse: {
+            integrationLease: string;
+            /** Format: date-time */
+            revokedAt: string;
+            /** @enum {string} */
+            status: "revoked";
+            version: number;
         };
         RoleOverride: {
             agent?: string;
@@ -2036,6 +2194,266 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    issueIntegrationMergeLease: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IssueIntegrationMergeLeaseRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueIntegrationMergeLeaseResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeIntegrationMergeLease: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque SuperOrch-issued integration lease id. */
+                leaseId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokeIntegrationMergeLeaseResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    consumeIntegrationMerge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsumeIntegrationMergeRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsumeIntegrationMergeResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

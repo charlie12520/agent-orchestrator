@@ -34,7 +34,7 @@ const (
 	GenerationFencingVersion       = 0
 	DaemonControlGenerationVersion = 0
 	AuthenticatedIPCVersion        = 0
-	DatabaseSchemaVersion          = 38
+	DatabaseSchemaVersion          = 39
 )
 
 // Build identity is overridden by the deterministic daemon build script using

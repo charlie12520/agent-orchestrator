@@ -12,6 +12,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	integrationmerge "github.com/aoagents/agent-orchestrator/backend/internal/service/integrationmerge"
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	reviewsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/review"
@@ -38,24 +39,26 @@ type APIDeps struct {
 	Browser             controllers.BrowserService
 	PreviewServer       controllers.ManagedPreviewServer
 	SessionCapabilities controllers.SessionCapabilityValidator
+	IntegrationMerges   integrationmerge.Manager
 }
 
 // API owns one controller per resource and is the single Register call the
 // router invokes to mount the /api/v1 surface.
 type API struct {
-	cfg           config.Config
-	agents        *controllers.AgentsController
-	projects      *controllers.ProjectsController
-	sessions      *controllers.SessionsController
-	prs           *controllers.PRsController
-	reviews       *controllers.ReviewsController
-	notifications *controllers.NotificationsController
-	push          *controllers.PushController
-	imports       *controllers.ImportController
-	shellTerms    *controllers.ShellTerminalsController
-	dev           *controllers.DevController
-	browser       *controllers.BrowserController
-	events        *EventsController
+	cfg               config.Config
+	agents            *controllers.AgentsController
+	projects          *controllers.ProjectsController
+	sessions          *controllers.SessionsController
+	prs               *controllers.PRsController
+	reviews           *controllers.ReviewsController
+	notifications     *controllers.NotificationsController
+	push              *controllers.PushController
+	imports           *controllers.ImportController
+	shellTerms        *controllers.ShellTerminalsController
+	dev               *controllers.DevController
+	browser           *controllers.BrowserController
+	events            *EventsController
+	integrationMerges *controllers.IntegrationMergeController
 }
 
 // NewAPI constructs the API surface from its dependencies. cfg carries the
@@ -76,15 +79,16 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			PreviewServer: deps.PreviewServer,
 			Capabilities:  deps.SessionCapabilities,
 		},
-		prs:           &controllers.PRsController{Svc: deps.PRs},
-		reviews:       &controllers.ReviewsController{Svc: deps.Reviews},
-		notifications: &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream},
-		push:          &controllers.PushController{Registry: deps.Push},
-		imports:       &controllers.ImportController{Svc: deps.Import},
-		shellTerms:    &controllers.ShellTerminalsController{Svc: deps.ShellTerminals},
-		dev:           &controllers.DevController{Import: deps.DevImport},
-		browser:       &controllers.BrowserController{Svc: deps.Browser},
-		events:        &EventsController{Source: deps.CDC, Live: deps.Events},
+		prs:               &controllers.PRsController{Svc: deps.PRs},
+		reviews:           &controllers.ReviewsController{Svc: deps.Reviews},
+		notifications:     &controllers.NotificationsController{Svc: deps.Notifications, Stream: deps.NotificationStream},
+		push:              &controllers.PushController{Registry: deps.Push},
+		imports:           &controllers.ImportController{Svc: deps.Import},
+		shellTerms:        &controllers.ShellTerminalsController{Svc: deps.ShellTerminals},
+		dev:               &controllers.DevController{Import: deps.DevImport},
+		browser:           &controllers.BrowserController{Svc: deps.Browser},
+		events:            &EventsController{Source: deps.CDC, Live: deps.Events},
+		integrationMerges: &controllers.IntegrationMergeController{Svc: deps.IntegrationMerges},
 	}
 }
 
@@ -113,6 +117,7 @@ func (a *API) Register(root chi.Router) {
 			a.shellTerms.Register(r)
 			a.dev.Register(r)
 			a.browser.Register(r)
+			a.integrationMerges.Register(r)
 			// Sibling REST controllers plug in here.
 		})
 		// Long-lived streams intentionally bypass the REST timeout middleware.

@@ -12,7 +12,9 @@ import (
 	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 )
 
-// PRsController owns the /prs action routes.
+// PRsController owns the legacy /prs action routes. Its merge placeholder is
+// deliberately separate from the root-authenticated /integration/merges
+// service and remains 501 in production while Svc is nil.
 type PRsController struct {
 	Svc prsvc.ActionManager
 }
