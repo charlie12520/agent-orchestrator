@@ -18,7 +18,7 @@ func TestCurrentAttestationPinsEveryCompatibilityBoundary(t *testing.T) {
 		att.Protocols.BrowserBridge != 2 || att.Protocols.SessionControl != 1 || att.Protocols.PRControl != 1 ||
 		att.Protocols.OrchestratorControl != 1 || att.Protocols.DurableEventReplay != 0 ||
 		att.Protocols.DurableMutationJournal != 0 || att.Protocols.GenerationFencing != 0 ||
-		att.Protocols.AuthenticatedIPC != 0 || att.Protocols.DatabaseSchema != 38 {
+		att.Protocols.AuthenticatedIPC != 0 || att.Protocols.DatabaseSchema != 39 {
 		t.Fatalf("protocols = %+v", att.Protocols)
 	}
 	for _, capability := range []string{

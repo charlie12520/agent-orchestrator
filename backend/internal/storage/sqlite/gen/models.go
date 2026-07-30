@@ -21,6 +21,40 @@ type ChangeLog struct {
 	CreatedAt time.Time
 }
 
+type IntegrationMergeJournal struct {
+	IdempotencyKey string
+	RequestHash    []byte
+	LeaseID        string
+	State          string
+	AcceptedAt     time.Time
+	DispatchedAt   sql.NullTime
+	DispatchOwner  sql.NullString
+	DispatchFence  sql.NullString
+	CompletedAt    sql.NullTime
+	OutcomeJson    sql.NullString
+}
+
+type IntegrationMergeLease struct {
+	ID                     string
+	Repository             string
+	SourceRepository       string
+	PRNumber               int64
+	SourceBranch           string
+	ExpectedHeadSha        string
+	BaseRepository         string
+	BaseBranch             string
+	MergeStrategy          string
+	CheckPolicyJson        string
+	ReviewPolicyJson       string
+	ManualApprovalRequired bool
+	CapabilityDigest       []byte
+	Status                 string
+	CreatedAt              time.Time
+	ExpiresAt              time.Time
+	ConsumedAt             sql.NullTime
+	RevokedAt              sql.NullTime
+}
+
 type Notification struct {
 	ID        string
 	SessionID domain.SessionID

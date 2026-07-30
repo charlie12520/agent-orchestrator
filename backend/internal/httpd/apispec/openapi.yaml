@@ -350,6 +350,191 @@ paths:
       summary: Run the legacy AO project import through the daemon store
       tags:
       - import
+  /api/v1/integration/merge-leases:
+    post:
+      operationId: issueIntegrationMergeLease
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueIntegrationMergeLeaseRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssueIntegrationMergeLeaseResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Issue one bounded, root-authenticated integration lease
+      tags:
+      - integration
+  /api/v1/integration/merge-leases/{leaseId}/revoke:
+    post:
+      operationId: revokeIntegrationMergeLease
+      parameters:
+      - description: Opaque SuperOrch-issued integration lease id.
+        in: path
+        name: leaseId
+        required: true
+        schema:
+          description: Opaque SuperOrch-issued integration lease id.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokeIntegrationMergeLeaseResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "410":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Gone
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Revoke an active integration lease exactly once
+      tags:
+      - integration
+  /api/v1/integration/merges:
+    post:
+      operationId: consumeIntegrationMerge
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConsumeIntegrationMergeRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsumeIntegrationMergeResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "410":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Gone
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Consume a lease and SHA-bound merge through the configured broker
+      tags:
+      - integration
   /api/v1/mobile/disable:
     post:
       operationId: disableMobile
@@ -1054,7 +1239,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
-      summary: Squash-merge a pull request
+      summary: Legacy PR merge placeholder (not the integration gate)
       tags:
       - prs
   /api/v1/prs/{id}/resolve-comments:
@@ -2769,6 +2954,33 @@ components:
       - ok
       - sessionId
       type: object
+    ConsumeIntegrationMergeRequest:
+      properties:
+        gateCapability:
+          maxLength: 128
+          type: string
+        idempotencyKey:
+          maxLength: 128
+          minLength: 8
+          type: string
+        integrationLease:
+          maxLength: 64
+          type: string
+        manualApproval:
+          type: boolean
+      required:
+      - integrationLease
+      - gateCapability
+      - idempotencyKey
+      - manualApproval
+      type: object
+    ConsumeIntegrationMergeResponse:
+      properties:
+        outcome:
+          $ref: '#/components/schemas/IntegrationMergeOutcome'
+      required:
+      - outcome
+      type: object
     ControllersSessionView:
       properties:
         activity:
@@ -3006,6 +3218,273 @@ components:
           type: string
       required:
       - path
+      type: object
+    IntegrationCheckEvidence:
+      properties:
+        completedAt:
+          format: date-time
+          type: string
+        headSha:
+          maxLength: 40
+          minLength: 40
+          type: string
+        name:
+          maxLength: 128
+          type: string
+        status:
+          enum:
+          - passing
+          - pending
+          - failing
+          type: string
+      required:
+      - name
+      - headSha
+      - status
+      type: object
+    IntegrationCheckPolicy:
+      properties:
+        requireAllObservedPassing:
+          type: boolean
+        requiredChecks:
+          items:
+            type: string
+          type: array
+        revision:
+          maxLength: 128
+          type: string
+      required:
+      - revision
+      - requiredChecks
+      - requireAllObservedPassing
+      type: object
+    IntegrationMergeOutcome:
+      properties:
+        acceptedAt:
+          format: date-time
+          type: string
+        baseBranch:
+          type: string
+        baseRepository:
+          type: string
+        checkPolicy:
+          $ref: '#/components/schemas/IntegrationCheckPolicy'
+        checks:
+          items:
+            $ref: '#/components/schemas/IntegrationCheckEvidence'
+          type: array
+        completedAt:
+          format: date-time
+          type: string
+        dispatchedAt:
+          format: date-time
+          type: string
+        expectedHeadSha:
+          type: string
+        idempotencyKey:
+          type: string
+        mergeCommitSha:
+          type: string
+        mergeStrategy:
+          type: string
+        prNumber:
+          type: integer
+        reason:
+          maxLength: 128
+          type: string
+        repository:
+          type: string
+        reviewPolicy:
+          $ref: '#/components/schemas/IntegrationReviewPolicy'
+        reviews:
+          items:
+            $ref: '#/components/schemas/IntegrationReviewEvidence'
+          type: array
+        sourceBranch:
+          type: string
+        sourceRepository:
+          type: string
+        status:
+          enum:
+          - merged
+          - revalidation_required
+          - ambiguous
+          type: string
+        unresolvedReviewThreads:
+          type: integer
+        version:
+          type: integer
+      required:
+      - version
+      - status
+      - idempotencyKey
+      - repository
+      - sourceRepository
+      - prNumber
+      - sourceBranch
+      - expectedHeadSha
+      - baseRepository
+      - baseBranch
+      - mergeStrategy
+      - checkPolicy
+      - checks
+      - reviewPolicy
+      - reviews
+      - unresolvedReviewThreads
+      - acceptedAt
+      - completedAt
+      type: object
+    IntegrationReviewEvidence:
+      properties:
+        decision:
+          enum:
+          - approved
+          - changes_requested
+          - commented
+          - dismissed
+          type: string
+        headSha:
+          maxLength: 40
+          minLength: 40
+          type: string
+        reviewer:
+          maxLength: 128
+          type: string
+        submittedAt:
+          format: date-time
+          type: string
+      required:
+      - reviewer
+      - headSha
+      - decision
+      - submittedAt
+      type: object
+    IntegrationReviewPolicy:
+      properties:
+        requireResolvedThreads:
+          type: boolean
+        requiredApprovals:
+          maximum: 100
+          minimum: 0
+          type: integer
+        requiredReviewers:
+          items:
+            type: string
+          type: array
+        revision:
+          maxLength: 128
+          type: string
+      required:
+      - revision
+      - requiredApprovals
+      - requiredReviewers
+      - requireResolvedThreads
+      type: object
+    IssueIntegrationMergeLeaseRequest:
+      properties:
+        baseBranch:
+          maxLength: 255
+          type: string
+        baseRepository:
+          maxLength: 256
+          type: string
+        checkPolicy:
+          $ref: '#/components/schemas/IntegrationCheckPolicy'
+        expectedHeadSha:
+          maxLength: 40
+          minLength: 40
+          type: string
+        expiresAt:
+          format: date-time
+          type: string
+        manualApprovalRequired:
+          type: boolean
+        mergeStrategy:
+          enum:
+          - squash
+          - merge
+          - rebase
+          type: string
+        prNumber:
+          maximum: 1e+09
+          minimum: 1
+          type: integer
+        repository:
+          maxLength: 256
+          type: string
+        reviewPolicy:
+          $ref: '#/components/schemas/IntegrationReviewPolicy'
+        sourceBranch:
+          maxLength: 255
+          type: string
+        sourceRepository:
+          maxLength: 256
+          type: string
+      required:
+      - repository
+      - sourceRepository
+      - prNumber
+      - sourceBranch
+      - expectedHeadSha
+      - baseRepository
+      - baseBranch
+      - checkPolicy
+      - reviewPolicy
+      - manualApprovalRequired
+      type: object
+    IssueIntegrationMergeLeaseResponse:
+      properties:
+        baseBranch:
+          type: string
+        baseRepository:
+          type: string
+        checkPolicy:
+          $ref: '#/components/schemas/IntegrationCheckPolicy'
+        expectedHeadSha:
+          type: string
+        expiresAt:
+          format: date-time
+          type: string
+        gateCapability:
+          type: string
+        integrationLease:
+          type: string
+        issuedAt:
+          format: date-time
+          type: string
+        manualApprovalRequired:
+          type: boolean
+        mergeStrategy:
+          type: string
+        prNumber:
+          type: integer
+        repository:
+          type: string
+        reviewPolicy:
+          $ref: '#/components/schemas/IntegrationReviewPolicy'
+        sourceBranch:
+          type: string
+        sourceRepository:
+          type: string
+        version:
+          type: integer
+      required:
+      - version
+      - integrationLease
+      - gateCapability
+      - repository
+      - sourceRepository
+      - prNumber
+      - sourceBranch
+      - expectedHeadSha
+      - baseRepository
+      - baseBranch
+      - mergeStrategy
+      - checkPolicy
+      - reviewPolicy
+      - manualApprovalRequired
+      - issuedAt
+      - expiresAt
       type: object
     KillSessionResponse:
       properties:
@@ -3656,6 +4135,25 @@ components:
       - review
       - reviews
       - reviewerHandleId
+      type: object
+    RevokeIntegrationMergeLeaseResponse:
+      properties:
+        integrationLease:
+          type: string
+        revokedAt:
+          format: date-time
+          type: string
+        status:
+          enum:
+          - revoked
+          type: string
+        version:
+          type: integer
+      required:
+      - version
+      - integrationLease
+      - status
+      - revokedAt
       type: object
     RoleOverride:
       properties:
@@ -4405,3 +4903,5 @@ tags:
   name: mobile
 - description: Target-isolated desktop browser runtime (loopback only)
   name: browser
+- description: Root-authenticated deterministic integration leases and brokered merges
+  name: integration
