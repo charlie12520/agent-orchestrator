@@ -187,8 +187,8 @@ type Deps struct {
 	Now           func() time.Time
 	Random        io.Reader
 	Faults        FaultInjector
-	// FinalizationTimeout bounds each service-owned terminal persistence
-	// attempt after Dispatcher may have crossed the side-effect boundary.
+	// FinalizationTimeout bounds each service-owned ownership confirmation or
+	// terminal persistence attempt after the durable dispatch claim.
 	FinalizationTimeout time.Duration
 }
 
@@ -359,14 +359,21 @@ func (s *Service) dispatchAccepted(ctx context.Context, journal domain.Execution
 	if err := s.inject(ctx, FaultAfterDispatch); err != nil {
 		return Result{}, err
 	}
-	confirmed, err := s.store.ConfirmExecutionDispatch(ctx, journal.OperationID, s.dispatchOwner, fence)
+	confirmationCtx, cancel := s.boundedOwnershipContext(ctx)
+	confirmed, err := s.store.ConfirmExecutionDispatch(confirmationCtx, journal.OperationID, s.dispatchOwner, fence)
+	cancel()
 	if err != nil {
-		return Result{}, operationError(CodeStorageFailure, "dispatch_confirmation_failed", err)
+		return s.recoverDispatchConfirmation(ctx, journal, fence, err)
 	}
-	if !confirmed.Changed {
-		return s.resumeJournal(ctx, confirmed.Journal, true)
+	if !confirmed.Changed || confirmed.Journal.State != domain.ExecutionDispatched {
+		return s.recoverDispatchConfirmation(ctx, journal, fence, errors.New("dispatch confirmation was not durably proven"))
 	}
 
+	// Durable claim plus confirmation commits this operation to exactly one
+	// Dispatcher attempt. Caller cancellation is a transport/liveness signal,
+	// not a rollback: a cooperative dispatcher may stop, while one racing or
+	// ignoring cancellation may cross the side-effect boundary. Either error is
+	// therefore closed as owner-fenced ambiguity below, never redispatched.
 	receipt, dispatchErr := s.dispatcher.Dispatch(ctx, DispatchCommand{
 		OperationID:       journal.OperationID,
 		ExternalRunID:     journal.ExternalRunID,
@@ -386,7 +393,7 @@ func (s *Service) dispatchAccepted(ctx context.Context, journal domain.Execution
 	if err != nil {
 		return s.recordOwnerAmbiguity(ctx, journal, fence)
 	}
-	finalizationCtx, cancel := s.finalizationContext(ctx)
+	finalizationCtx, cancel := s.boundedOwnershipContext(ctx)
 	completed, err := s.store.RecordExecutionResult(finalizationCtx, completion, s.dispatchOwner, fence)
 	cancel()
 	if err != nil {
@@ -415,12 +422,25 @@ func (s *Service) dispatchAccepted(ctx context.Context, journal domain.Execution
 	return result, nil
 }
 
+func (s *Service) recoverDispatchConfirmation(ctx context.Context, journal domain.ExecutionOperationJournal, fence string, confirmationErr error) (Result, error) {
+	// ClaimExecutionDispatch already crossed the durable ownership boundary.
+	// Confirmation failures are therefore uncertain: the confirmation may have
+	// committed even when its acknowledgement was lost. A fresh, detached
+	// owner-fenced ambiguity CAS either replays an exact terminal outcome or
+	// closes the still-owned dispatch without invoking Dispatcher.
+	recovered, ambiguityErr := s.recordOwnerAmbiguity(ctx, journal, fence)
+	if ambiguityErr != nil {
+		return Result{}, operationError(CodeStorageFailure, "dispatch_confirmation_and_ambiguity_failed", errors.Join(confirmationErr, ambiguityErr))
+	}
+	return recovered, nil
+}
+
 func (s *Service) recordOwnerAmbiguity(ctx context.Context, journal domain.ExecutionOperationJournal, fence string) (Result, error) {
 	canonical, hash, err := canonicalizeResult([]byte(`{"status":"ambiguous"}`))
 	if err != nil {
 		panic(err)
 	}
-	finalizationCtx, cancel := s.finalizationContext(ctx)
+	finalizationCtx, cancel := s.boundedOwnershipContext(ctx)
 	transition, err := s.store.RecordExecutionAmbiguous(finalizationCtx, Completion{
 		OperationID: journal.OperationID, ExternalRunID: journal.ExternalRunID,
 		ResultJSON: canonical, ResultHash: hash[:], CompletedAt: s.now().UTC(),
@@ -435,7 +455,7 @@ func (s *Service) recordOwnerAmbiguity(ctx context.Context, journal domain.Execu
 	return resultFromPostDispatchTransition(transition, !transition.Changed)
 }
 
-func (s *Service) finalizationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+func (s *Service) boundedOwnershipContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), s.finalizationTimeout)
 }
 

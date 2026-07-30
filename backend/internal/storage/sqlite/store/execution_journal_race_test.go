@@ -77,11 +77,87 @@ func (f *executionFault) Fail(_ context.Context, point executionjournal.FaultPoi
 
 type executionTerminalWriteStore struct {
 	executionjournal.Store
+	claimDispatch   func(context.Context, string, string, string, time.Time) (executionjournal.Transition, error)
+	confirmDispatch func(context.Context, string, string, string) (executionjournal.Transition, error)
 	recordResult    func(context.Context, executionjournal.Completion, string, string) (executionjournal.Transition, error)
 	recordAmbiguous func(context.Context, executionjournal.Completion, string, string) (executionjournal.Transition, error)
 }
 
 type executionFinalizationContextKey struct{}
+
+type executionControlledDeadlineContext struct {
+	context.Context
+	mu       sync.Mutex
+	deadline time.Time
+	done     chan struct{}
+	err      error
+	once     sync.Once
+}
+
+func newExecutionControlledDeadlineContext(parent context.Context) *executionControlledDeadlineContext {
+	return &executionControlledDeadlineContext{
+		Context:  parent,
+		deadline: time.Now().Add(time.Hour),
+		done:     make(chan struct{}),
+	}
+}
+
+func (c *executionControlledDeadlineContext) Deadline() (time.Time, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.deadline, true
+}
+
+func (c *executionControlledDeadlineContext) Done() <-chan struct{} { return c.done }
+
+func (c *executionControlledDeadlineContext) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+func (c *executionControlledDeadlineContext) expire() {
+	c.once.Do(func() {
+		c.mu.Lock()
+		c.deadline = time.Now()
+		c.err = context.DeadlineExceeded
+		c.mu.Unlock()
+		close(c.done)
+	})
+}
+
+func detachedContextError(ctx context.Context, wantValue string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("service-owned context began canceled: %w", err)
+	}
+	if wantValue != "" {
+		if value := ctx.Value(executionFinalizationContextKey{}); value != wantValue {
+			return fmt.Errorf("service-owned context lost caller value: %v", value)
+		}
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return errors.New("service-owned context has no deadline")
+	}
+	if !deadline.After(time.Now()) {
+		return fmt.Errorf("service-owned deadline is not fresh: %s", deadline)
+	}
+	return nil
+}
+
+func (s *executionTerminalWriteStore) ClaimExecutionDispatch(ctx context.Context, operationID, owner, fence string, at time.Time) (executionjournal.Transition, error) {
+	if s.claimDispatch != nil {
+		return s.claimDispatch(ctx, operationID, owner, fence, at)
+	}
+	return s.Store.ClaimExecutionDispatch(ctx, operationID, owner, fence, at)
+}
+
+func (s *executionTerminalWriteStore) ConfirmExecutionDispatch(ctx context.Context, operationID, owner, fence string) (executionjournal.Transition, error) {
+	if s.confirmDispatch != nil {
+		return s.confirmDispatch(ctx, operationID, owner, fence)
+	}
+	return s.Store.ConfirmExecutionDispatch(ctx, operationID, owner, fence)
+}
 
 func (s *executionTerminalWriteStore) RecordExecutionResult(ctx context.Context, completion executionjournal.Completion, owner, fence string) (executionjournal.Transition, error) {
 	if s.recordResult != nil {
@@ -559,6 +635,304 @@ func TestExecutionJournalFinalizesAfterCallerCancellation(t *testing.T) {
 				t.Fatalf("replay=%#v err=%v calls=%d", replay, err, dispatcher.count())
 			}
 		})
+	}
+}
+
+func TestExecutionJournalPostClaimCancellationUsesDetachedConfirmation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		isDeadline bool
+		isMutation bool
+		wantErr    error
+	}{
+		{name: "canceled", wantErr: context.Canceled},
+		{name: "deadline-exceeded", isDeadline: true, wantErr: context.DeadlineExceeded},
+		{name: "canceled-mutation", isMutation: true, wantErr: context.Canceled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t)
+			externalRunID := "external-post-claim-" + test.name
+			raw := launchExecutionRequest(externalRunID, "launch-post-claim-"+test.name, `{}`)
+			if test.isMutation {
+				seedDispatcher := &executionDispatchFake{}
+				seedService := newExecutionService(t, store, seedDispatcher, "owner-post-claim-seed", 27, nil)
+				launch, err := seedService.Execute(context.Background(), raw)
+				if err != nil || launch.State != domain.ExecutionResult || seedDispatcher.count() != 1 {
+					t.Fatalf("seed launch=%#v err=%v calls=%d", launch, err, seedDispatcher.count())
+				}
+				raw = mutationExecutionRequest(externalRunID, launch.RunID, "send", "mutation-post-claim-"+test.name, 1, `{}`)
+			}
+			const contextValue = "post-claim-request-scope"
+			base := context.WithValue(context.Background(), executionFinalizationContextKey{}, contextValue)
+			var callerCtx context.Context
+			var expireCaller func()
+			if test.isDeadline {
+				deadlineCtx := newExecutionControlledDeadlineContext(base)
+				callerCtx = deadlineCtx
+				expireCaller = deadlineCtx.expire
+			} else {
+				cancelCtx, cancel := context.WithCancel(base)
+				callerCtx = cancelCtx
+				expireCaller = cancel
+				defer cancel()
+			}
+
+			claimCalls, confirmationCalls, ambiguityCalls := 0, 0, 0
+			var confirmationContextErr error
+			var ambiguityContextErr error
+			faultStore := &executionTerminalWriteStore{Store: store}
+			faultStore.claimDispatch = func(ctx context.Context, operationID, owner, fence string, at time.Time) (executionjournal.Transition, error) {
+				claimCalls++
+				transition, err := store.ClaimExecutionDispatch(ctx, operationID, owner, fence, at)
+				if err == nil && transition.Changed {
+					expireCaller()
+				}
+				return transition, err
+			}
+			faultStore.confirmDispatch = func(ctx context.Context, operationID, owner, fence string) (executionjournal.Transition, error) {
+				confirmationCalls++
+				if err := detachedContextError(ctx, contextValue); err != nil {
+					confirmationContextErr = err
+					return executionjournal.Transition{}, err
+				}
+				return store.ConfirmExecutionDispatch(ctx, operationID, owner, fence)
+			}
+			faultStore.recordAmbiguous = func(ctx context.Context, completion executionjournal.Completion, owner, fence string) (executionjournal.Transition, error) {
+				ambiguityCalls++
+				if err := detachedContextError(ctx, contextValue); err != nil {
+					ambiguityContextErr = err
+					return executionjournal.Transition{}, err
+				}
+				return store.RecordExecutionAmbiguous(ctx, completion, owner, fence)
+			}
+
+			// Confirmation is durably proven despite caller cancellation, so the
+			// dispatcher receives exactly one attempt with the canceled caller
+			// context; its refusal is then durably closed as ambiguous.
+			dispatcher := &executionDispatchFake{release: make(chan struct{})}
+			service := newExecutionServiceWithFinalizationTimeout(t, faultStore, dispatcher, "owner-post-claim-"+test.name, 24, nil, time.Second)
+
+			first, err := service.Execute(callerCtx, raw)
+			if err != nil || first.State != domain.ExecutionAmbiguous || first.Replayed || dispatcher.count() != 1 {
+				t.Fatalf("first=%#v err=%v calls=%d", first, err, dispatcher.count())
+			}
+			if !errors.Is(callerCtx.Err(), test.wantErr) {
+				t.Fatalf("caller context error=%v, want %v", callerCtx.Err(), test.wantErr)
+			}
+			if confirmationContextErr != nil || ambiguityContextErr != nil {
+				t.Fatalf("detached contexts: confirmation=%v ambiguity=%v", confirmationContextErr, ambiguityContextErr)
+			}
+			if claimCalls != 1 || confirmationCalls != 1 || ambiguityCalls != 1 {
+				t.Fatalf("transition calls: claim=%d confirmation=%d ambiguity=%d", claimCalls, confirmationCalls, ambiguityCalls)
+			}
+			assertExecutionPendingBindingState(t, store, externalRunID, domain.ExecutionBindingAmbiguous, 1)
+
+			replay, err := service.Execute(context.Background(), raw)
+			if err != nil || replay.State != domain.ExecutionAmbiguous || !replay.Replayed || !bytes.Equal(replay.ResultJSON, first.ResultJSON) || dispatcher.count() != 1 {
+				t.Fatalf("replay=%#v err=%v calls=%d", replay, err, dispatcher.count())
+			}
+			if claimCalls != 1 || confirmationCalls != 1 || ambiguityCalls != 1 {
+				t.Fatalf("exact retry attempted transitions: claim=%d confirmation=%d ambiguity=%d", claimCalls, confirmationCalls, ambiguityCalls)
+			}
+		})
+	}
+}
+
+func TestExecutionJournalConfirmationUncertaintyClosesWithOwnerFence(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		postCommit          bool
+		notProven           bool
+		returnedState       domain.ExecutionJournalState
+		preexistingTerminal bool
+		exhaustConfirmation bool
+		wantReplay          bool
+	}{
+		{name: "pre-commit-error"},
+		{name: "post-commit-ack-lost", postCommit: true},
+		{name: "confirmation-not-proven", notProven: true},
+		{name: "confirmation-not-proven-invalid-state", notProven: true, returnedState: domain.ExecutionAccepted},
+		{name: "confirmation-changed-invalid-state", returnedState: domain.ExecutionAccepted},
+		{name: "confirmation-error-replays-durable-terminal", preexistingTerminal: true, wantReplay: true},
+		{name: "confirmation-timeout-fresh-ambiguity-window", exhaustConfirmation: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t)
+			confirmationCalls, ambiguityCalls := 0, 0
+			confirmationErr := errors.New("dispatch confirmation unavailable")
+			var ambiguityContextErr error
+			externalRunID := "external-confirm-" + test.name
+			raw := launchExecutionRequest(externalRunID, "launch-confirm-"+test.name, `{}`)
+			faultStore := &executionTerminalWriteStore{Store: store}
+			faultStore.confirmDispatch = func(ctx context.Context, operationID, owner, fence string) (executionjournal.Transition, error) {
+				confirmationCalls++
+				if test.exhaustConfirmation {
+					<-ctx.Done()
+					return executionjournal.Transition{}, ctx.Err()
+				}
+				if test.postCommit || test.notProven || test.returnedState != "" || test.preexistingTerminal {
+					transition, err := store.ConfirmExecutionDispatch(ctx, operationID, owner, fence)
+					if err != nil {
+						return executionjournal.Transition{}, err
+					}
+					if test.preexistingTerminal {
+						canonical := []byte(`{"status":"ambiguous"}`)
+						hash := sha256.Sum256(canonical)
+						if _, err := store.RecordExecutionAmbiguous(ctx, executionjournal.Completion{
+							OperationID: operationID, ExternalRunID: externalRunID,
+							ResultJSON: canonical, ResultHash: hash[:], CompletedAt: time.Now().UTC(),
+						}, owner, fence); err != nil {
+							return executionjournal.Transition{}, err
+						}
+						return executionjournal.Transition{}, confirmationErr
+					}
+					if test.returnedState != "" {
+						transition.Journal.State = test.returnedState
+					}
+					if test.notProven {
+						transition.Changed = false
+						return transition, nil
+					}
+					if test.returnedState != "" {
+						return transition, nil
+					}
+				}
+				return executionjournal.Transition{}, confirmationErr
+			}
+			faultStore.recordAmbiguous = func(ctx context.Context, completion executionjournal.Completion, owner, fence string) (executionjournal.Transition, error) {
+				ambiguityCalls++
+				if err := detachedContextError(ctx, ""); err != nil {
+					ambiguityContextErr = err
+					return executionjournal.Transition{}, err
+				}
+				return store.RecordExecutionAmbiguous(ctx, completion, owner, fence)
+			}
+			dispatcher := &executionDispatchFake{}
+			service := newExecutionServiceWithFinalizationTimeout(t, faultStore, dispatcher, "owner-confirm-"+test.name, 25, nil, 25*time.Millisecond)
+
+			first, err := service.Execute(context.Background(), raw)
+			if err != nil || first.State != domain.ExecutionAmbiguous || first.Replayed != test.wantReplay || dispatcher.count() != 0 {
+				t.Fatalf("first=%#v err=%v calls=%d", first, err, dispatcher.count())
+			}
+			if ambiguityContextErr != nil {
+				t.Fatalf("fresh ambiguity context=%v", ambiguityContextErr)
+			}
+			if confirmationCalls != 1 || ambiguityCalls != 1 {
+				t.Fatalf("transition calls: confirmation=%d ambiguity=%d", confirmationCalls, ambiguityCalls)
+			}
+			assertExecutionPendingBindingState(t, store, externalRunID, domain.ExecutionBindingAmbiguous, 1)
+
+			replay, err := service.Execute(context.Background(), raw)
+			if err != nil || replay.State != domain.ExecutionAmbiguous || !replay.Replayed || !bytes.Equal(replay.ResultJSON, first.ResultJSON) || dispatcher.count() != 0 {
+				t.Fatalf("replay=%#v err=%v calls=%d", replay, err, dispatcher.count())
+			}
+			if confirmationCalls != 1 || ambiguityCalls != 1 {
+				t.Fatalf("exact retry attempted transitions: confirmation=%d ambiguity=%d", confirmationCalls, ambiguityCalls)
+			}
+		})
+	}
+}
+
+func TestExecutionJournalConfirmationAmbiguityFailureIsBoundedAndFailsClosed(t *testing.T) {
+	store := newTestStore(t)
+	confirmationCalls, ambiguityCalls := 0, 0
+	confirmationUnavailable := errors.New("confirmation database unavailable")
+	ambiguityUnavailable := errors.New("ambiguity database unavailable")
+	faultStore := &executionTerminalWriteStore{Store: store}
+	faultStore.confirmDispatch = func(ctx context.Context, _, _, _ string) (executionjournal.Transition, error) {
+		confirmationCalls++
+		<-ctx.Done()
+		return executionjournal.Transition{}, errors.Join(confirmationUnavailable, ctx.Err())
+	}
+	faultStore.recordAmbiguous = func(ctx context.Context, _ executionjournal.Completion, _, _ string) (executionjournal.Transition, error) {
+		ambiguityCalls++
+		if err := ctx.Err(); err != nil {
+			return executionjournal.Transition{}, fmt.Errorf("ambiguity context began canceled: %w", err)
+		}
+		if _, ok := ctx.Deadline(); !ok {
+			return executionjournal.Transition{}, errors.New("ambiguity context has no service deadline")
+		}
+		<-ctx.Done()
+		return executionjournal.Transition{}, errors.Join(ambiguityUnavailable, ctx.Err())
+	}
+	dispatcher := &executionDispatchFake{}
+	service := newExecutionServiceWithFinalizationTimeout(t, faultStore, dispatcher, "owner-confirm-db-unavailable", 26, nil, 20*time.Millisecond)
+	raw := launchExecutionRequest("external-confirm-db-unavailable", "launch-confirm-db-unavailable", `{}`)
+
+	started := time.Now()
+	_, err := service.Execute(context.Background(), raw)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("bounded confirmation recovery took %s", elapsed)
+	}
+	if code, reason, ok := executionjournal.ErrorInfo(err); !ok || code != executionjournal.CodeStorageFailure || reason != "dispatch_confirmation_and_ambiguity_failed" {
+		t.Fatalf("recovery error=%v code=%q reason=%q", err, code, reason)
+	}
+	if !errors.Is(err, confirmationUnavailable) || !errors.Is(err, ambiguityUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("recovery error lost joined causes: %v", err)
+	}
+	if confirmationCalls != 1 || ambiguityCalls != 1 || dispatcher.count() != 0 {
+		t.Fatalf("calls: confirmation=%d ambiguity=%d dispatch=%d", confirmationCalls, ambiguityCalls, dispatcher.count())
+	}
+	request, parseErr := executionjournal.ParseRequest(raw)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	journal, found, journalErr := store.GetExecutionOperation(context.Background(), request.OperationID)
+	if journalErr != nil || !found || journal.State != domain.ExecutionDispatched {
+		t.Fatalf("journal=%#v found=%v err=%v", journal, found, journalErr)
+	}
+	assertExecutionPendingBindingState(t, store, "external-confirm-db-unavailable", domain.ExecutionBindingLaunching, 1)
+
+	if _, retryErr := service.Execute(context.Background(), raw); executionErrorCode(retryErr) != executionjournal.CodeReconciliationRequired || dispatcher.count() != 0 {
+		t.Fatalf("exact retry err=%v dispatch calls=%d", retryErr, dispatcher.count())
+	}
+	if confirmationCalls != 1 || ambiguityCalls != 1 {
+		t.Fatalf("exact retry attempted recovery: confirmation=%d ambiguity=%d", confirmationCalls, ambiguityCalls)
+	}
+}
+
+func TestExecutionJournalConfirmationAmbiguityAckLossReplaysDurableTerminal(t *testing.T) {
+	store := newTestStore(t)
+	confirmationCalls, ambiguityCalls := 0, 0
+	confirmationUnavailable := errors.New("confirmation database unavailable")
+	ambiguityAckLost := errors.New("ambiguity acknowledgement lost")
+	faultStore := &executionTerminalWriteStore{Store: store}
+	faultStore.confirmDispatch = func(context.Context, string, string, string) (executionjournal.Transition, error) {
+		confirmationCalls++
+		return executionjournal.Transition{}, confirmationUnavailable
+	}
+	faultStore.recordAmbiguous = func(ctx context.Context, completion executionjournal.Completion, owner, fence string) (executionjournal.Transition, error) {
+		ambiguityCalls++
+		if err := detachedContextError(ctx, ""); err != nil {
+			return executionjournal.Transition{}, err
+		}
+		if _, err := store.RecordExecutionAmbiguous(ctx, completion, owner, fence); err != nil {
+			return executionjournal.Transition{}, err
+		}
+		return executionjournal.Transition{}, ambiguityAckLost
+	}
+	dispatcher := &executionDispatchFake{}
+	service := newExecutionServiceWithFinalizationTimeout(t, faultStore, dispatcher, "owner-confirm-ambiguity-ack", 28, nil, time.Second)
+	raw := launchExecutionRequest("external-confirm-ambiguity-ack", "launch-confirm-ambiguity-ack", `{}`)
+
+	_, err := service.Execute(context.Background(), raw)
+	if code, reason, ok := executionjournal.ErrorInfo(err); !ok || code != executionjournal.CodeStorageFailure || reason != "dispatch_confirmation_and_ambiguity_failed" {
+		t.Fatalf("ack-loss error=%v code=%q reason=%q", err, code, reason)
+	}
+	if !errors.Is(err, confirmationUnavailable) || !errors.Is(err, ambiguityAckLost) {
+		t.Fatalf("ack-loss error lost joined causes: %v", err)
+	}
+	if confirmationCalls != 1 || ambiguityCalls != 1 || dispatcher.count() != 0 {
+		t.Fatalf("calls: confirmation=%d ambiguity=%d dispatch=%d", confirmationCalls, ambiguityCalls, dispatcher.count())
+	}
+	assertExecutionPendingBindingState(t, store, "external-confirm-ambiguity-ack", domain.ExecutionBindingAmbiguous, 1)
+
+	replay, err := service.Execute(context.Background(), raw)
+	if err != nil || replay.State != domain.ExecutionAmbiguous || !replay.Replayed || dispatcher.count() != 0 {
+		t.Fatalf("replay=%#v err=%v calls=%d", replay, err, dispatcher.count())
+	}
+	if confirmationCalls != 1 || ambiguityCalls != 1 {
+		t.Fatalf("exact retry attempted recovery: confirmation=%d ambiguity=%d", confirmationCalls, ambiguityCalls)
 	}
 }
 
