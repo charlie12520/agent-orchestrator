@@ -67,7 +67,7 @@ func (d *deterministicExecutionDispatcher) Dispatch(_ context.Context, command e
 	}
 	return executionjournal.DispatchReceipt{
 		RunID:      "run-http-1",
-		ResultJSON: []byte(`{"accepted":true,"backend":"deterministic-test"}`),
+		ResultJSON: []byte(`{"execution":{"argv":["runner","--token","opaque-argv-secret"],"env":{"AO_TOKEN":"opaque-env-secret"},"private":{"prompt":"opaque-prompt-secret","token":"opaque-token-secret"}}}`),
 	}, nil
 }
 
@@ -125,6 +125,38 @@ func executionErrorCode(t *testing.T, body []byte) string {
 		t.Fatalf("decode error response: %v body=%s", err, body)
 	}
 	return decoded.Code
+}
+
+func assertOpaqueExecutionResultAbsent(t *testing.T, body []byte) {
+	t.Helper()
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatalf("decode execution response: %v body=%s", err, body)
+	}
+	if _, exposed := response["result"]; exposed {
+		t.Fatalf("response exposed opaque result property: %s", body)
+	}
+	for _, forbidden := range []string{
+		`"argv"`, `"env"`, `"private"`, `"prompt"`, `"token"`,
+		"opaque-argv-secret", "opaque-env-secret", "opaque-prompt-secret", "opaque-token-secret", "must-not-leak",
+	} {
+		if strings.Contains(string(body), forbidden) {
+			t.Fatalf("response exposed opaque result content %q: %s", forbidden, body)
+		}
+	}
+}
+
+func assertExecutionMetadataPresent(t *testing.T, body []byte, runField, generationField string) {
+	t.Helper()
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatalf("decode execution response: %v body=%s", err, body)
+	}
+	for _, field := range []string{runField, generationField, "state"} {
+		if _, present := response[field]; !present {
+			t.Fatalf("response omitted safe metadata field %q: %s", field, body)
+		}
+	}
 }
 
 func TestExecutionControllerPassesValidatedRequestBytesUnchanged(t *testing.T) {
@@ -228,6 +260,8 @@ func TestExecutionHTTPExactReplayConflictAndSanitizedReads(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(string(firstBody), `"replayed":false`) {
 		t.Fatalf("first response = %d %s", status, firstBody)
 	}
+	assertOpaqueExecutionResultAbsent(t, firstBody)
+	assertExecutionMetadataPresent(t, firstBody, "runId", "processGeneration")
 	var first struct {
 		OperationID string `json:"operationId"`
 	}
@@ -241,6 +275,8 @@ func TestExecutionHTTPExactReplayConflictAndSanitizedReads(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(string(replayBody), `"replayed":true`) {
 		t.Fatalf("replay response = %d %s", status, replayBody)
 	}
+	assertOpaqueExecutionResultAbsent(t, replayBody)
+	assertExecutionMetadataPresent(t, replayBody, "runId", "processGeneration")
 	conflictBody := strings.Replace(requestBody, `"prompt":"hello"`, `"prompt":"different"`, 1)
 	request = executionRequest(t, server, http.MethodPost, "/api/v1/execution/operations", conflictBody)
 	status, body := performExecutionRequest(t, request)
@@ -251,19 +287,25 @@ func TestExecutionHTTPExactReplayConflictAndSanitizedReads(t *testing.T) {
 		t.Fatalf("dispatcher calls = %d, want 1", dispatcher.calls)
 	}
 
-	for _, path := range []string{
-		"/api/v1/execution/operations/" + first.OperationID,
-		"/api/v1/execution/bindings/external-http-1",
+	for _, read := range []struct {
+		path            string
+		runField        string
+		generationField string
+	}{
+		{path: "/api/v1/execution/operations/" + first.OperationID, runField: "resultRunId", generationField: "resultProcessGeneration"},
+		{path: "/api/v1/execution/bindings/external-http-1", runField: "runId", generationField: "processGeneration"},
 	} {
-		request = executionRequest(t, server, http.MethodGet, path, "")
+		request = executionRequest(t, server, http.MethodGet, read.path, "")
 		status, body = performExecutionRequest(t, request)
 		if status != http.StatusOK {
-			t.Fatalf("GET %s = %d %s", path, status, body)
+			t.Fatalf("GET %s = %d %s", read.path, status, body)
 		}
+		assertOpaqueExecutionResultAbsent(t, body)
+		assertExecutionMetadataPresent(t, body, read.runField, read.generationField)
 		lower := strings.ToLower(string(body))
 		for _, forbidden := range []string{"must-not-leak", "idempotencykey", "requesthash", "requestjson", "dispatchowner", "resulthash", "launchoperationid", "launchrequesthash"} {
 			if strings.Contains(lower, forbidden) {
-				t.Fatalf("GET %s leaked %q: %s", path, forbidden, body)
+				t.Fatalf("GET %s leaked %q: %s", read.path, forbidden, body)
 			}
 		}
 	}
@@ -293,7 +335,7 @@ func TestExecutionUnavailableMutationDoesNotCreateJournalState(t *testing.T) {
 	}
 }
 
-func TestExecutionResponseOmitsUnsetLifecycleAndPreservesEmptyResult(t *testing.T) {
+func TestExecutionResponseOmitsUnsetLifecycleAndOpaqueEmptyResult(t *testing.T) {
 	backend := &fakeExecutionBackend{
 		journalFound: true,
 		journal: domain.ExecutionOperationJournal{
@@ -313,17 +355,15 @@ func TestExecutionResponseOmitsUnsetLifecycleAndPreservesEmptyResult(t *testing.
 		t.Fatalf("response = %d %s", status, body)
 	}
 	response := string(body)
-	if !strings.Contains(response, `"result":{}`) {
-		t.Fatalf("empty durable result was omitted: %s", body)
-	}
-	for _, forbidden := range []string{"dispatchedAt", "completedAt", "0001-01-01"} {
+	assertOpaqueExecutionResultAbsent(t, body)
+	for _, forbidden := range []string{"dispatchedAt", "completedAt", "0001-01-01", `"result"`} {
 		if strings.Contains(response, forbidden) {
 			t.Fatalf("unset lifecycle field %q leaked: %s", forbidden, body)
 		}
 	}
 }
 
-func TestExecutionControllerRejectsCorruptOrOversizedDurableResult(t *testing.T) {
+func TestExecutionControllerDoesNotInspectOrProjectOpaqueDurableResult(t *testing.T) {
 	results := map[string][]byte{
 		"malformed": []byte(`{"secret":"must-not-leak"`),
 		"scalar":    []byte(`true`),
@@ -339,12 +379,10 @@ func TestExecutionControllerRejectsCorruptOrOversizedDurableResult(t *testing.T)
 			server := executionServer(t, backend)
 			request := executionRequest(t, server, http.MethodPost, "/api/v1/execution/operations", validLaunchRequest)
 			status, body := performExecutionRequest(t, request)
-			if status != http.StatusServiceUnavailable || executionErrorCode(t, body) != "EXECUTION_STORAGE_FAILURE" {
+			if status != http.StatusOK {
 				t.Fatalf("response = %d %s", status, body)
 			}
-			if strings.Contains(string(body), "must-not-leak") {
-				t.Fatalf("response leaked corrupt durable result: %s", body)
-			}
+			assertOpaqueExecutionResultAbsent(t, body)
 		})
 	}
 }

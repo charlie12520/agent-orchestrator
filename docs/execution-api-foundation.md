@@ -40,16 +40,19 @@ process generations are rejected before the execution backend is called.
 Equivalent JSON number and object-order spellings are canonicalized to the same
 request identity.
 
-An exact retry returns the durable result with `replayed: true`. Reusing the
-same operation identity for different canonical request bytes returns a
-conflict. Responses never include the idempotency key, accepted request bytes,
-request/result hashes, dispatch owner, or storage error causes.
+An exact retry returns the durable operation metadata with `replayed: true`.
+Reusing the same operation identity for different canonical request bytes
+returns a conflict. Responses never include the idempotency key, accepted
+request bytes, opaque backend result JSON, request/result hashes, dispatch
+owner, or storage error causes. Opaque results, including nested environment,
+argument, prompt, token, and private fields, remain internal until a typed,
+reviewed public result contract exists.
 
 ### `GET /api/v1/execution/operations/{operationId}`
 
-Returns sanitized durable lifecycle and result fields for a 64-character
-lowercase-hex operation id. Private request identity and dispatch fencing data
-are omitted.
+Returns sanitized durable lifecycle plus safe top-level run, generation, and
+state metadata for a 64-character lowercase-hex operation id. Private request
+identity, opaque backend result JSON, and dispatch fencing data are omitted.
 
 ### `GET /api/v1/execution/bindings/{externalRunId}`
 

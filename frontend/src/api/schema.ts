@@ -1149,9 +1149,6 @@ export interface components {
             /** Format: int64 */
             processGeneration: number;
             replayed: boolean;
-            result?: {
-                [key: string]: unknown;
-            };
             runId?: string;
             /** @enum {string} */
             state: "accepted" | "dispatched" | "result" | "ambiguous";
@@ -1186,9 +1183,6 @@ export interface components {
             /** @enum {string} */
             operation: "launch" | "send" | "interrupt" | "resume" | "restore" | "stop" | "cleanup";
             operationId: string;
-            result?: {
-                [key: string]: unknown;
-            };
             /** Format: int64 */
             resultProcessGeneration?: number;
             resultRunId?: string;

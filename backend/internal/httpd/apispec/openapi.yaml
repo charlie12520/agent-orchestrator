@@ -3475,9 +3475,6 @@ components:
           type: integer
         replayed:
           type: boolean
-        result:
-          additionalProperties: {}
-          type: object
         runId:
           maxLength: 128
           pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
@@ -3586,9 +3583,6 @@ components:
           minLength: 64
           pattern: ^[0-9a-f]{64}$
           type: string
-        result:
-          additionalProperties: {}
-          type: object
         resultProcessGeneration:
           format: int64
           type: integer

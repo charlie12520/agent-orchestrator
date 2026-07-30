@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
+	yaml "gopkg.in/yaml.v3"
 )
 
 // TestDefaultLoadsEmbeddedSpec is the smoke test for //go:embed wiring:
@@ -97,6 +98,39 @@ func TestExecutionSpecRequiresManagedAndIdempotencyHeaders(t *testing.T) {
 	for name, found := range required {
 		if !found {
 			t.Errorf("required execution header %q missing", name)
+		}
+	}
+}
+
+func TestExecutionSpecDoesNotExposeOpaqueResults(t *testing.T) {
+	var document struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]any `yaml:"properties"`
+			} `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(apispec.Default().YAML(), &document); err != nil {
+		t.Fatalf("parse embedded spec: %v", err)
+	}
+	for _, response := range []struct {
+		name           string
+		safeProperties []string
+	}{
+		{name: "ExecuteOperationResponse", safeProperties: []string{"runId", "processGeneration", "state"}},
+		{name: "ExecutionOperationResponse", safeProperties: []string{"resultRunId", "resultProcessGeneration", "targetProcessGeneration", "state"}},
+	} {
+		schema, found := document.Components.Schemas[response.name]
+		if !found {
+			t.Fatalf("schema %q missing", response.name)
+		}
+		for _, property := range response.safeProperties {
+			if _, found := schema.Properties[property]; !found {
+				t.Fatalf("schema %q missing safe metadata property %q", response.name, property)
+			}
+		}
+		if _, exposed := schema.Properties["result"]; exposed {
+			t.Fatalf("schema %q exposed opaque result property", response.name)
 		}
 	}
 }

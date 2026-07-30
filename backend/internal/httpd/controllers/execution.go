@@ -1,9 +1,7 @@
 package controllers
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"mime"
@@ -77,6 +75,8 @@ type ExecutionExternalRunIDParam struct {
 	ExternalRunID string `path:"externalRunId" minLength:"1" maxLength:"128" pattern:"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"`
 }
 
+// ExecuteOperationResponse exposes only stable operation metadata. Backend
+// result JSON is opaque journal state and never crosses the HTTP boundary.
 type ExecuteOperationResponse struct {
 	Version           int                          `json:"version" enum:"1"`
 	OperationID       string                       `json:"operationId" minLength:"64" maxLength:"64" pattern:"^[0-9a-f]{64}$"`
@@ -85,13 +85,12 @@ type ExecuteOperationResponse struct {
 	Operation         domain.ExecutionOperation    `json:"operation" enum:"launch,send,interrupt,resume,restore,stop,cleanup"`
 	ProcessGeneration int64                        `json:"processGeneration" minimum:"1" maximum:"9007199254740991"`
 	State             domain.ExecutionJournalState `json:"state" enum:"accepted,dispatched,result,ambiguous"`
-	Result            *map[string]any              `json:"result,omitempty" nullable:"false"`
 	Replayed          bool                         `json:"replayed"`
 }
 
 // ExecutionOperationResponse is intentionally sanitized: request bytes,
-// request/result hashes, idempotency keys, and dispatch ownership never cross
-// the HTTP boundary.
+// opaque result JSON, request/result hashes, idempotency keys, and dispatch
+// ownership never cross the HTTP boundary.
 type ExecutionOperationResponse struct {
 	Version                   int                          `json:"version" enum:"1"`
 	OperationID               string                       `json:"operationId" minLength:"64" maxLength:"64" pattern:"^[0-9a-f]{64}$"`
@@ -106,7 +105,6 @@ type ExecutionOperationResponse struct {
 	CompletedAt               *time.Time                   `json:"completedAt,omitempty" nullable:"false"`
 	ResultRunID               string                       `json:"resultRunId,omitempty"`
 	ResultProcessGeneration   int64                        `json:"resultProcessGeneration,omitempty"`
-	Result                    *map[string]any              `json:"result,omitempty" nullable:"false"`
 }
 
 // ExecutionBindingResponse omits launch request identity and exposes only the
@@ -166,12 +164,7 @@ func (c *ExecutionController) execute(w http.ResponseWriter, r *http.Request) {
 		writeExecutionError(w, r, err)
 		return
 	}
-	response, err := executeOperationResponse(result)
-	if err != nil {
-		writeExecutionStorageFailure(w, r)
-		return
-	}
-	envelope.WriteJSON(w, http.StatusOK, response)
+	envelope.WriteJSON(w, http.StatusOK, executeOperationResponse(result))
 }
 
 func (c *ExecutionController) getOperation(w http.ResponseWriter, r *http.Request) {
@@ -193,12 +186,7 @@ func (c *ExecutionController) getOperation(w http.ResponseWriter, r *http.Reques
 		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "EXECUTION_OPERATION_NOT_FOUND", "Execution operation not found", nil)
 		return
 	}
-	response, err := executionOperationResponse(journal)
-	if err != nil {
-		writeExecutionStorageFailure(w, r)
-		return
-	}
-	envelope.WriteJSON(w, http.StatusOK, response)
+	envelope.WriteJSON(w, http.StatusOK, executionOperationResponse(journal))
 }
 
 func (c *ExecutionController) getBinding(w http.ResponseWriter, r *http.Request) {
@@ -244,24 +232,16 @@ func validExecutionContentType(r *http.Request) bool {
 	return true
 }
 
-func executeOperationResponse(result executionjournal.Result) (ExecuteOperationResponse, error) {
-	decoded, err := decodeExecutionResult(result.ResultJSON)
-	if err != nil {
-		return ExecuteOperationResponse{}, err
-	}
+func executeOperationResponse(result executionjournal.Result) ExecuteOperationResponse {
 	return ExecuteOperationResponse{
 		Version: executionjournal.ContractVersion, OperationID: result.OperationID,
 		ExternalRunID: result.ExternalRunID, RunID: result.RunID, Operation: result.Operation,
 		ProcessGeneration: result.ProcessGeneration, State: result.State,
-		Result: decoded, Replayed: result.Replayed,
-	}, nil
+		Replayed: result.Replayed,
+	}
 }
 
-func executionOperationResponse(journal domain.ExecutionOperationJournal) (ExecutionOperationResponse, error) {
-	decoded, err := decodeExecutionResult(journal.ResultJSON)
-	if err != nil {
-		return ExecutionOperationResponse{}, err
-	}
+func executionOperationResponse(journal domain.ExecutionOperationJournal) ExecutionOperationResponse {
 	return ExecutionOperationResponse{
 		Version: executionjournal.ContractVersion, OperationID: journal.OperationID,
 		ExternalRunID: journal.ExternalRunID, RunID: journal.RunID, Operation: journal.Operation,
@@ -269,27 +249,8 @@ func executionOperationResponse(journal domain.ExecutionOperationJournal) (Execu
 		TargetProcessGeneration:   journal.TargetProcessGeneration, State: journal.State,
 		AcceptedAt: journal.AcceptedAt, DispatchedAt: executionTimeIfSet(journal.DispatchedAt),
 		CompletedAt: executionTimeIfSet(journal.CompletedAt), ResultRunID: journal.ResultRunID,
-		ResultProcessGeneration: journal.ResultProcessGeneration, Result: decoded,
-	}, nil
-}
-
-func decodeExecutionResult(raw []byte) (*map[string]any, error) {
-	if len(raw) == 0 {
-		return nil, nil
+		ResultProcessGeneration: journal.ResultProcessGeneration,
 	}
-	if len(raw) > maxExecutionRequestBytes || !json.Valid(raw) {
-		return nil, errors.New("invalid durable execution result")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var result map[string]any
-	if err := decoder.Decode(&result); err != nil || result == nil {
-		return nil, errors.New("execution result must be an object")
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return nil, errors.New("execution result has trailing data")
-	}
-	return &result, nil
 }
 
 func executionTimeIfSet(value time.Time) *time.Time {
