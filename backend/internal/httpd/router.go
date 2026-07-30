@@ -46,6 +46,9 @@ type ControlDeps struct {
 //	recoverer      → turn a handler panic into 500 instead of crashing the daemon
 //	cors           → CORS allowlist for the Electron renderer / dev origins
 //
+// Listener provenance is stamped immediately after RequestID and before
+// RealIP/managed authentication; the outer LAN marker always wins.
+//
 // The per-request timeout is deliberately not global: it wraps only bounded
 // REST routes, never long-lived terminal streams or health probes.
 func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager, args ...any) chi.Router {
@@ -53,8 +56,10 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r := chi.NewRouter()
 	managed, deps, control := parseRouterArgs(args)
 	api := NewAPI(cfg, deps)
+	api.managedExecution = managed != nil
 
 	r.Use(middleware.RequestID)
+	r.Use(func(next http.Handler) http.Handler { return markTransportScope(transportScopePrimary, next) })
 	r.Use(middleware.RealIP)
 	r.Use(primaryLoopbackAuthMiddleware(managed))
 	r.Use(requestLogger(log, deps.Telemetry))
@@ -381,6 +386,7 @@ type transportScopeKey struct{}
 
 const (
 	daemonGenerationHeader = "X-AO-Daemon-Generation"
+	transportScopePrimary  = "primary"
 	transportScopeLAN      = "lan"
 )
 
@@ -494,10 +500,26 @@ func transportScope(r *http.Request) string {
 func markTransportScope(scope string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		if transportScope(r) == scope {
+		// The outermost physical listener wins. In particular, the shared router's
+		// primary marker must never replace the LAN manager's earlier LAN marker.
+		if transportScope(r) != "" {
 			next.ServeHTTP(w, r)
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, transportScopeKey{}, scope)))
+	})
+}
+
+// primaryTransportOnly hides the managed execution surface from every listener
+// except the daemon's primary loopback socket. Scope is listener provenance,
+// not client-controlled Host or forwarding headers. Encoded path aliases are
+// also hidden instead of being normalized onto a privileged route.
+func primaryTransportOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if transportScope(r) != transportScopePrimary || r.URL == nil || r.URL.RawPath != "" {
+			notFoundJSON(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }

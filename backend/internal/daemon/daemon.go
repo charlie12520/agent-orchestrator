@@ -35,6 +35,7 @@ import (
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
+	executionapisvc "github.com/aoagents/agent-orchestrator/backend/internal/service/executionapi"
 	importsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/importer"
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
@@ -292,6 +293,9 @@ func RunWithOptions(opts RunOptions) error {
 		Browser:             browserService,
 		PreviewServer:       managedPreview,
 		SessionCapabilities: browserAuthority,
+		// A2 exposes sanitized journal reads. Mutation intentionally fails closed
+		// until the separately reviewed real execution dispatcher is accepted.
+		Execution: executionapisvc.New(store, nil),
 	})
 	if err != nil {
 		stop()

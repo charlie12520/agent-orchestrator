@@ -301,6 +301,235 @@ paths:
       summary: Stream CDC events with durable replay
       tags:
       - events
+  /api/v1/execution/bindings/{externalRunId}:
+    get:
+      operationId: getExecutionBinding
+      parameters:
+      - description: Exact managed-daemon bearer credential.
+        in: header
+        name: Authorization
+        required: true
+        schema:
+          description: Exact managed-daemon bearer credential.
+          pattern: ^Bearer [0-9a-f]{64}$
+          type: string
+      - description: Exact current managed-daemon generation.
+        in: header
+        name: X-AO-Daemon-Generation
+        required: true
+        schema:
+          description: Exact current managed-daemon generation.
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+      - in: path
+        name: externalRunId
+        required: true
+        schema:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionBindingResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Read one sanitized durable execution run binding
+      tags:
+      - execution
+  /api/v1/execution/operations:
+    post:
+      operationId: executeOperation
+      parameters:
+      - description: Exact managed-daemon bearer credential.
+        in: header
+        name: Authorization
+        required: true
+        schema:
+          description: Exact managed-daemon bearer credential.
+          pattern: ^Bearer [0-9a-f]{64}$
+          type: string
+      - description: Exact current managed-daemon generation.
+        in: header
+        name: X-AO-Daemon-Generation
+        required: true
+        schema:
+          description: Exact current managed-daemon generation.
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+      - description: Must exactly equal the canonical request body's idempotencyKey.
+        in: header
+        name: Idempotency-Key
+        required: true
+        schema:
+          description: Must exactly equal the canonical request body's idempotencyKey.
+          maxLength: 128
+          minLength: 1
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecuteOperationRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecuteOperationResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Request Entity Too Large
+        "415":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unsupported Media Type
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Accept or exactly replay one managed execution mutation
+      tags:
+      - execution
+  /api/v1/execution/operations/{operationId}:
+    get:
+      operationId: getExecutionOperation
+      parameters:
+      - description: Exact managed-daemon bearer credential.
+        in: header
+        name: Authorization
+        required: true
+        schema:
+          description: Exact managed-daemon bearer credential.
+          pattern: ^Bearer [0-9a-f]{64}$
+          type: string
+      - description: Exact current managed-daemon generation.
+        in: header
+        name: X-AO-Daemon-Generation
+        required: true
+        schema:
+          description: Exact current managed-daemon generation.
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+      - in: path
+        name: operationId
+        required: true
+        schema:
+          maxLength: 64
+          minLength: 64
+          pattern: ^[0-9a-f]{64}$
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionOperationResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Read one sanitized durable execution operation
+      tags:
+      - execution
   /api/v1/import:
     get:
       operationId: getImportStatus
@@ -3171,6 +3400,229 @@ components:
       required:
       - harness
       type: object
+    ExecuteOperationRequest:
+      additionalProperties: false
+      properties:
+        expectedProcessGeneration:
+          format: int64
+          maximum: 9.007199254740991e+15
+          minimum: 1
+          type: integer
+        externalRunId:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        idempotencyKey:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        operation:
+          enum:
+          - launch
+          - send
+          - interrupt
+          - resume
+          - restore
+          - stop
+          - cleanup
+          type: string
+        request:
+          additionalProperties: {}
+          type: object
+        runId:
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        version:
+          enum:
+          - 1
+          type: integer
+      required:
+      - version
+      - externalRunId
+      - operation
+      - idempotencyKey
+      - request
+      type: object
+    ExecuteOperationResponse:
+      properties:
+        externalRunId:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        operation:
+          enum:
+          - launch
+          - send
+          - interrupt
+          - resume
+          - restore
+          - stop
+          - cleanup
+          type: string
+        operationId:
+          maxLength: 64
+          minLength: 64
+          pattern: ^[0-9a-f]{64}$
+          type: string
+        processGeneration:
+          format: int64
+          maximum: 9.007199254740991e+15
+          minimum: 1
+          type: integer
+        replayed:
+          type: boolean
+        result:
+          additionalProperties: {}
+          type: object
+        runId:
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        state:
+          enum:
+          - accepted
+          - dispatched
+          - result
+          - ambiguous
+          type: string
+        version:
+          enum:
+          - 1
+          type: integer
+      required:
+      - version
+      - operationId
+      - externalRunId
+      - operation
+      - processGeneration
+      - state
+      - replayed
+      type: object
+    ExecutionBindingResponse:
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        externalRunId:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        pendingOperationId:
+          maxLength: 64
+          minLength: 64
+          pattern: ^[0-9a-f]{64}$
+          type: string
+        processGeneration:
+          format: int64
+          maximum: 9.007199254740991e+15
+          minimum: 0
+          type: integer
+        runId:
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        state:
+          enum:
+          - launching
+          - active
+          - stopped
+          - cleaned
+          - busy
+          - ambiguous
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+        version:
+          enum:
+          - 1
+          type: integer
+      required:
+      - version
+      - externalRunId
+      - state
+      - processGeneration
+      - createdAt
+      - updatedAt
+      type: object
+    ExecutionOperationResponse:
+      properties:
+        acceptedAt:
+          format: date-time
+          type: string
+        completedAt:
+          format: date-time
+          type: string
+        dispatchedAt:
+          format: date-time
+          type: string
+        expectedProcessGeneration:
+          format: int64
+          maximum: 9.007199254740991e+15
+          minimum: 1
+          type: integer
+        externalRunId:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        operation:
+          enum:
+          - launch
+          - send
+          - interrupt
+          - resume
+          - restore
+          - stop
+          - cleanup
+          type: string
+        operationId:
+          maxLength: 64
+          minLength: 64
+          pattern: ^[0-9a-f]{64}$
+          type: string
+        result:
+          additionalProperties: {}
+          type: object
+        resultProcessGeneration:
+          format: int64
+          type: integer
+        resultRunId:
+          type: string
+        runId:
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        state:
+          enum:
+          - accepted
+          - dispatched
+          - result
+          - ambiguous
+          type: string
+        targetProcessGeneration:
+          format: int64
+          maximum: 9.007199254740991e+15
+          minimum: 1
+          type: integer
+        version:
+          enum:
+          - 1
+          type: integer
+      required:
+      - version
+      - operationId
+      - externalRunId
+      - operation
+      - targetProcessGeneration
+      - state
+      - acceptedAt
+      type: object
     ImportReport:
       properties:
         dryRun:
@@ -4905,3 +5357,5 @@ tags:
   name: browser
 - description: Root-authenticated deterministic integration leases and brokered merges
   name: integration
+- description: Managed primary-loopback execution mutation and sanitized journal reads
+  name: execution

@@ -69,3 +69,34 @@ func TestServeYAML(t *testing.T) {
 		t.Errorf("body did not begin with an OpenAPI 3.1 doc")
 	}
 }
+
+func TestExecutionSpecRequiresManagedAndIdempotencyHeaders(t *testing.T) {
+	op := apispec.Default().Operation(http.MethodPost, "/api/v1/execution/operations")
+	if op == nil {
+		t.Fatal("execution operation missing from embedded spec")
+	}
+	params, ok := op["parameters"].([]any)
+	if !ok {
+		t.Fatalf("execution parameters = %#v", op["parameters"])
+	}
+	required := map[string]bool{
+		"Authorization":          false,
+		"X-AO-Daemon-Generation": false,
+		"Idempotency-Key":        false,
+	}
+	for _, raw := range params {
+		param, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := param["name"].(string)
+		if _, tracked := required[name]; tracked && param["required"] == true {
+			required[name] = true
+		}
+	}
+	for name, found := range required {
+		if !found {
+			t.Errorf("required execution header %q missing", name)
+		}
+	}
+}

@@ -40,6 +40,7 @@ type APIDeps struct {
 	PreviewServer       controllers.ManagedPreviewServer
 	SessionCapabilities controllers.SessionCapabilityValidator
 	IntegrationMerges   integrationmerge.Manager
+	Execution           controllers.ExecutionBackend
 }
 
 // API owns one controller per resource and is the single Register call the
@@ -59,6 +60,8 @@ type API struct {
 	browser           *controllers.BrowserController
 	events            *EventsController
 	integrationMerges *controllers.IntegrationMergeController
+	execution         *controllers.ExecutionController
+	managedExecution  bool
 }
 
 // NewAPI constructs the API surface from its dependencies. cfg carries the
@@ -89,6 +92,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		browser:           &controllers.BrowserController{Svc: deps.Browser},
 		events:            &EventsController{Source: deps.CDC, Live: deps.Events},
 		integrationMerges: &controllers.IntegrationMergeController{Svc: deps.IntegrationMerges},
+		execution:         &controllers.ExecutionController{Backend: deps.Execution},
 	}
 }
 
@@ -106,6 +110,12 @@ func (a *API) Register(root chi.Router) {
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Timeout(timeout))
+			if a.managedExecution {
+				r.Group(func(r chi.Router) {
+					r.Use(primaryTransportOnly)
+					a.execution.Register(r)
+				})
+			}
 			a.agents.Register(r)
 			a.projects.Register(r)
 			a.sessions.Register(r)
