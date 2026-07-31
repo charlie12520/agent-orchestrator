@@ -281,6 +281,13 @@ type BrowserCapabilityHeader struct {
 	Capability string `header:"X-AO-Browser-Capability" description:"Opaque browser capability injected into the owning AO worker."`
 }
 
+// RuntimeLaunchHeader identifies the current supervised process generation.
+// Managed worker callbacks pair it with BrowserCapabilityHeader so a stale
+// process cannot report activity for a replacement generation.
+type RuntimeLaunchHeader struct {
+	LaunchID string `header:"X-AO-Runtime-Launch-ID" pattern:"^[A-Za-z0-9_-]+$" description:"Current supervised AO worker process generation."`
+}
+
 // BrowserStatusResponse reports whether the desktop-owned browser transport is
 // ready. A connected runtime can create the session target while its panel is
 // hidden; panel visibility is intentionally not part of this state.
