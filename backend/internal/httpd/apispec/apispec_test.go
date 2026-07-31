@@ -23,6 +23,64 @@ func TestDefaultLoadsEmbeddedSpec(t *testing.T) {
 	}
 }
 
+// TestRelaunchRequestBodiesAreOptionalMessages locks the wire compatibility
+// contract: existing clients may omit the body, while managed callers can send
+// one atomic first message.
+func TestRelaunchRequestBodiesAreOptionalMessages(t *testing.T) {
+	var document struct {
+		Paths map[string]map[string]struct {
+			RequestBody struct {
+				Required bool `yaml:"required"`
+				Content  map[string]struct {
+					Schema struct {
+						Ref string `yaml:"$ref"`
+					} `yaml:"schema"`
+				} `yaml:"content"`
+			} `yaml:"requestBody"`
+		} `yaml:"paths"`
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]any `yaml:"properties"`
+				Required   []string       `yaml:"required"`
+			} `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(apispec.Default().YAML(), &document); err != nil {
+		t.Fatalf("parse embedded spec: %v", err)
+	}
+
+	for _, tc := range []struct {
+		path, schema string
+	}{
+		{path: "/api/v1/sessions/{sessionId}/restore", schema: "RestoreSessionRequest"},
+		{path: "/api/v1/sessions/{sessionId}/resume-agent", schema: "ResumeAgentRequest"},
+	} {
+		op, ok := document.Paths[tc.path]["post"]
+		if !ok {
+			t.Fatalf("POST %s missing", tc.path)
+		}
+		if op.RequestBody.Required {
+			t.Fatalf("POST %s request body is required; empty-body clients must remain compatible", tc.path)
+		}
+		wantRef := "#/components/schemas/" + tc.schema
+		if got := op.RequestBody.Content["application/json"].Schema.Ref; got != wantRef {
+			t.Fatalf("POST %s request schema = %q, want %q", tc.path, got, wantRef)
+		}
+		schema, ok := document.Components.Schemas[tc.schema]
+		if !ok {
+			t.Fatalf("schema %q missing", tc.schema)
+		}
+		if _, ok := schema.Properties["message"]; !ok {
+			t.Fatalf("schema %q missing optional message property", tc.schema)
+		}
+		for _, required := range schema.Required {
+			if required == "message" {
+				t.Fatalf("schema %q requires message", tc.schema)
+			}
+		}
+	}
+}
+
 // TestOperation_MissingPath returns nil for unknown paths — that's how the
 // controller-side test catches "route registered without spec coverage".
 func TestOperation_MissingPath(t *testing.T) {

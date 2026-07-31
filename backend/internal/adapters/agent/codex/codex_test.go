@@ -519,6 +519,7 @@ func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 
 	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
 		Permissions:      ports.PermissionModeAuto,
+		Prompt:           "continue atomically",
 		SystemPrompt:     "restore inline wins",
 		SystemPromptFile: filepath.Join("tmp", "restore-system.md"),
 		Session: ports.SessionRef{
@@ -549,6 +550,7 @@ func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 		"-c", `projects={`+codexTOMLConfigString(workspace)+`={trust_level="trusted"}}`,
 		"-c", "developer_instructions="+codexTOMLConfigString("restore inline wins"),
 		"thread-123",
+		"continue atomically",
 	)
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)

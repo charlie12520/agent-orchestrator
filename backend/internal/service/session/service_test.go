@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -572,6 +573,8 @@ type fakeCommander struct {
 	killsAtSpawn    int
 	restoreErr      error
 	restoreResult   sessionmanager.RestoreResult
+	restoreMessages []string
+	resumeMessages  []string
 }
 
 func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
@@ -586,13 +589,15 @@ func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.
 	}
 	return domain.SessionRecord{ID: "mer-9", ProjectID: cfg.ProjectID, Kind: cfg.Kind, Harness: cfg.Harness}, len(cfg.Prompt), 0, nil
 }
-func (f *fakeCommander) RestoreWithMode(context.Context, domain.SessionID) (sessionmanager.RestoreResult, error) {
+func (f *fakeCommander) RestoreWithMode(_ context.Context, _ domain.SessionID, message ...string) (sessionmanager.RestoreResult, error) {
+	f.restoreMessages = append(f.restoreMessages, message...)
 	if f.restoreErr != nil {
 		return sessionmanager.RestoreResult{}, f.restoreErr
 	}
 	return f.restoreResult, nil
 }
-func (f *fakeCommander) ResumeAgentWithMode(context.Context, domain.SessionID) (sessionmanager.RestoreResult, error) {
+func (f *fakeCommander) ResumeAgentWithMode(_ context.Context, _ domain.SessionID, message ...string) (sessionmanager.RestoreResult, error) {
+	f.resumeMessages = append(f.resumeMessages, message...)
 	if f.restoreErr != nil {
 		return sessionmanager.RestoreResult{}, f.restoreErr
 	}
@@ -1154,7 +1159,7 @@ func TestRestoreMapsManagerModeToServiceView(t *testing.T) {
 	}
 	svc := &Service{manager: fc, store: st}
 
-	got, err := svc.Restore(context.Background(), "mer-1")
+	got, err := svc.Restore(context.Background(), "mer-1", "atomic restore message")
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -1163,6 +1168,9 @@ func TestRestoreMapsManagerModeToServiceView(t *testing.T) {
 	}
 	if got.Mode != RestoreModeViewSavedPrompt {
 		t.Fatalf("mode = %q, want %q", got.Mode, RestoreModeViewSavedPrompt)
+	}
+	if !reflect.DeepEqual(fc.restoreMessages, []string{"atomic restore message"}) {
+		t.Fatalf("manager restore messages = %#v", fc.restoreMessages)
 	}
 }
 
@@ -1183,12 +1191,15 @@ func TestResumeAgentMapsManagerModeToServiceView(t *testing.T) {
 	}
 	svc := &Service{manager: fc, store: st}
 
-	got, err := svc.ResumeAgent(context.Background(), "mer-1")
+	got, err := svc.ResumeAgent(context.Background(), "mer-1", "atomic resume message")
 	if err != nil {
 		t.Fatalf("ResumeAgent: %v", err)
 	}
 	if got.Session.ID != "mer-1" || got.Mode != RestoreModeViewNative {
 		t.Fatalf("resume outcome = %+v", got)
+	}
+	if !reflect.DeepEqual(fc.resumeMessages, []string{"atomic resume message"}) {
+		t.Fatalf("manager resume messages = %#v", fc.resumeMessages)
 	}
 }
 

@@ -45,8 +45,8 @@ type ListFilter struct {
 // *sessionmanager.Manager in production, a fake in tests.
 type commander interface {
 	Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error)
-	RestoreWithMode(ctx context.Context, id domain.SessionID) (sessionmanager.RestoreResult, error)
-	ResumeAgentWithMode(ctx context.Context, id domain.SessionID) (sessionmanager.RestoreResult, error)
+	RestoreWithMode(ctx context.Context, id domain.SessionID, message ...string) (sessionmanager.RestoreResult, error)
+	ResumeAgentWithMode(ctx context.Context, id domain.SessionID, message ...string) (sessionmanager.RestoreResult, error)
 	Kill(ctx context.Context, id domain.SessionID) (bool, error)
 	RetireForReplacement(ctx context.Context, id domain.SessionID) error
 	Send(ctx context.Context, id domain.SessionID, message string) error
@@ -442,8 +442,8 @@ func (s *Service) lockOrchestratorProject(projectID domain.ProjectID) func() {
 }
 
 // Restore relaunches a terminated session and returns the API-facing read model.
-func (s *Service) Restore(ctx context.Context, id domain.SessionID) (RestoreOutcome, error) {
-	res, err := s.manager.RestoreWithMode(ctx, id)
+func (s *Service) Restore(ctx context.Context, id domain.SessionID, message ...string) (RestoreOutcome, error) {
+	res, err := s.manager.RestoreWithMode(ctx, id, message...)
 	if err != nil {
 		return RestoreOutcome{}, toAPIError(err)
 	}
@@ -456,8 +456,8 @@ func (s *Service) Restore(ctx context.Context, id domain.SessionID) (RestoreOutc
 
 // ResumeAgent relaunches an exited agent without restoring a terminated
 // session or recreating its workspace.
-func (s *Service) ResumeAgent(ctx context.Context, id domain.SessionID) (ResumeAgentOutcome, error) {
-	res, err := s.manager.ResumeAgentWithMode(ctx, id)
+func (s *Service) ResumeAgent(ctx context.Context, id domain.SessionID, message ...string) (ResumeAgentOutcome, error) {
+	res, err := s.manager.ResumeAgentWithMode(ctx, id, message...)
 	if err != nil {
 		return ResumeAgentOutcome{}, toAPIError(err)
 	}

@@ -67,8 +67,8 @@ type SessionService interface {
 	Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error)
 	SpawnOrchestrator(ctx context.Context, projectID domain.ProjectID, clean bool) (domain.Session, error)
 	Get(ctx context.Context, id domain.SessionID) (domain.Session, error)
-	Restore(ctx context.Context, id domain.SessionID) (sessionsvc.RestoreOutcome, error)
-	ResumeAgent(ctx context.Context, id domain.SessionID) (sessionsvc.ResumeAgentOutcome, error)
+	Restore(ctx context.Context, id domain.SessionID, message ...string) (sessionsvc.RestoreOutcome, error)
+	ResumeAgent(ctx context.Context, id domain.SessionID, message ...string) (sessionsvc.ResumeAgentOutcome, error)
 	Kill(ctx context.Context, id domain.SessionID) (bool, error)
 	RollbackSpawn(ctx context.Context, id domain.SessionID) (sessionsvc.RollbackOutcome, error)
 	Cleanup(ctx context.Context, project domain.ProjectID) (sessionsvc.CleanupOutcome, error)
@@ -772,7 +772,17 @@ func (c *SessionsController) restore(w http.ResponseWriter, r *http.Request) {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/restore")
 		return
 	}
-	out, err := c.Svc.Restore(r.Context(), sessionID(r))
+	var in RestoreSessionRequest
+	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	if len(in.Message) > maxMessageLen {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "MESSAGE_TOO_LONG", "Message is too long", nil)
+		return
+	}
+	message := domain.SanitizeControlChars(in.Message)
+	out, err := c.Svc.Restore(r.Context(), sessionID(r), message)
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
@@ -785,7 +795,17 @@ func (c *SessionsController) resumeAgent(w http.ResponseWriter, r *http.Request)
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/resume-agent")
 		return
 	}
-	out, err := c.Svc.ResumeAgent(r.Context(), sessionID(r))
+	var in ResumeAgentRequest
+	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	if len(in.Message) > maxMessageLen {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "MESSAGE_TOO_LONG", "Message is too long", nil)
+		return
+	}
+	message := domain.SanitizeControlChars(in.Message)
+	out, err := c.Svc.ResumeAgent(r.Context(), sessionID(r), message)
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return

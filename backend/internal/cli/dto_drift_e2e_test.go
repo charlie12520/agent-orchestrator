@@ -72,11 +72,11 @@ func (f *fakeSessionService) Get(context.Context, domain.SessionID) (domain.Sess
 	return domain.Session{}, nil
 }
 
-func (f *fakeSessionService) Restore(context.Context, domain.SessionID) (sessionsvc.RestoreOutcome, error) {
+func (f *fakeSessionService) Restore(context.Context, domain.SessionID, ...string) (sessionsvc.RestoreOutcome, error) {
 	return sessionsvc.RestoreOutcome{}, nil
 }
 
-func (f *fakeSessionService) ResumeAgent(context.Context, domain.SessionID) (sessionsvc.ResumeAgentOutcome, error) {
+func (f *fakeSessionService) ResumeAgent(context.Context, domain.SessionID, ...string) (sessionsvc.ResumeAgentOutcome, error) {
 	return sessionsvc.ResumeAgentOutcome{}, nil
 }
 

@@ -623,6 +623,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/cleanup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clean up one terminated session workspace */
+        post: operations["cleanupSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/kill": {
         parameters: {
             query?: never;
@@ -1061,6 +1078,7 @@ export interface components {
         };
         ControllersSessionView: {
             activity: components["schemas"]["DomainActivity"];
+            agentConfig?: components["schemas"]["AgentConfig"];
             branch?: string;
             /** Format: date-time */
             createdAt: string;
@@ -1074,6 +1092,7 @@ export interface components {
             previewRevision?: number;
             previewUrl?: string;
             projectId: string;
+            prompt?: string;
             prs: components["schemas"]["SessionPRFacts"][];
             /** @enum {string} */
             scmStatus?: "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged";
@@ -1083,6 +1102,7 @@ export interface components {
             terminateOnPrMerge: boolean;
             /** Format: date-time */
             updatedAt: string;
+            workspacePath?: string;
         };
         ControllersSpawnAttachmentInput: {
             data: string;
@@ -1522,12 +1542,18 @@ export interface components {
             ok: boolean;
             resolved: number;
         };
+        RestoreSessionRequest: {
+            message?: string;
+        };
         RestoreSessionResponse: {
             ok: boolean;
             /** @enum {string} */
             restoreMode: "native" | "saved_prompt" | "fresh";
             session: components["schemas"]["ControllersSessionView"];
             sessionId: string;
+        };
+        ResumeAgentRequest: {
+            message?: string;
         };
         ResumeAgentResponse: {
             ok: boolean;
@@ -1750,6 +1776,7 @@ export interface components {
             orchestrator: components["schemas"]["OrchestratorResponse"];
         };
         SpawnSessionRequest: {
+            agentConfig?: components["schemas"]["AgentConfig"];
             attachments?: components["schemas"]["ControllersSpawnAttachmentInput"][];
             branch?: string;
             displayName?: string;
@@ -4101,7 +4128,12 @@ export interface operations {
     setSessionActivity: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Opaque browser capability injected into the owning AO worker. */
+                "X-AO-Browser-Capability"?: string;
+                /** @description Current supervised AO worker process generation. */
+                "X-AO-Runtime-Launch-ID"?: string;
+            };
             path: {
                 /** @description Session identifier, e.g. project-1. */
                 sessionId: string;
@@ -4130,6 +4162,65 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    cleanupSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CleanupSessionsResponse"];
                 };
             };
             /** @description Not Found */
@@ -4881,7 +4972,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RestoreSessionRequest"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {
@@ -4931,7 +5026,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ResumeAgentRequest"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {

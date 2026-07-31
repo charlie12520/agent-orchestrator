@@ -296,15 +296,20 @@ func (fakeAgent) SessionInfo(context.Context, ports.SessionRef) (ports.SessionIn
 
 type launchArgvAgent struct {
 	fakeAgent
-	argv []string
+	argv                []string
+	appendRestorePrompt bool
 }
 
 func (a launchArgvAgent) GetLaunchCommand(context.Context, ports.LaunchConfig) ([]string, error) {
 	return a.argv, nil
 }
 
-func (a launchArgvAgent) GetRestoreCommand(context.Context, ports.RestoreConfig) ([]string, bool, error) {
-	return a.argv, true, nil
+func (a launchArgvAgent) GetRestoreCommand(_ context.Context, cfg ports.RestoreConfig) ([]string, bool, error) {
+	argv := append([]string(nil), a.argv...)
+	if a.appendRestorePrompt && cfg.Prompt != "" {
+		argv = append(argv, cfg.Prompt)
+	}
+	return argv, true, nil
 }
 
 type supervisedLaunchAgent struct{ launchArgvAgent }
@@ -917,7 +922,7 @@ func TestRestore_RotatesSupervisedAgentGeneration(t *testing.T) {
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
 	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", AgentSessionID: "agent-x", RuntimeLaunchID: "launch-old"})
 	rt := &fakeRuntime{}
-	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}}}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}, appendRestorePrompt: true}}
 	m := New(Deps{
 		Runtime: rt, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st,
 		Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
@@ -926,7 +931,7 @@ func TestRestore_RotatesSupervisedAgentGeneration(t *testing.T) {
 		NewLaunchID: func() string { return "launch-new" },
 	})
 
-	result, err := m.RestoreWithMode(ctx, "mer-1")
+	result, err := m.RestoreWithMode(ctx, "mer-1", "continue atomically")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -936,7 +941,7 @@ func TestRestore_RotatesSupervisedAgentGeneration(t *testing.T) {
 	if got := rt.lastCfg.Env[EnvRuntimeLaunchID]; got != "launch-new" {
 		t.Fatalf("restored launch env = %q, want launch-new", got)
 	}
-	wantArgv := []string{"/opt/ao", "agent-process", "supervise", "--session", "mer-1", "--launch", "launch-new", "--", "codex", "resume", "agent-x"}
+	wantArgv := []string{"/opt/ao", "agent-process", "supervise", "--session", "mer-1", "--launch", "launch-new", "--", "codex", "resume", "agent-x", "continue atomically"}
 	if !reflect.DeepEqual(rt.lastCfg.Argv, wantArgv) {
 		t.Fatalf("restored runtime argv = %#v, want %#v", rt.lastCfg.Argv, wantArgv)
 	}
@@ -976,7 +981,7 @@ func newExitedResumeManager(t *testing.T, runtime runtimeController, agent ports
 func TestResumeAgent_RestartsRuntimeWithManagedGeneration(t *testing.T) {
 	baseRuntime := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}}
 	runtime := &fakeRestartRuntime{fakeRuntime: baseRuntime}
-	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}}}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}, appendRestorePrompt: true}}
 	m, st, ws := newExitedResumeManager(t, runtime, agent)
 	lcm := m.lcm.(*fakeLCM)
 	runtime.onRestart = func() {
@@ -985,7 +990,7 @@ func TestResumeAgent_RestartsRuntimeWithManagedGeneration(t *testing.T) {
 		}
 	}
 
-	result, err := m.ResumeAgentWithMode(ctx, "mer-1")
+	result, err := m.ResumeAgentWithMode(ctx, "mer-1", "resume atomically")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -998,7 +1003,7 @@ func TestResumeAgent_RestartsRuntimeWithManagedGeneration(t *testing.T) {
 	if ws.lastCfg.SessionID != "" || len(ws.calls) != 0 {
 		t.Fatalf("resume should not restore or recreate workspace: cfg=%+v calls=%v", ws.lastCfg, ws.calls)
 	}
-	wantArgv := []string{"/opt/ao", "agent-process", "supervise", "--session", "mer-1", "--launch", "launch-new", "--", "codex", "resume", "agent-x"}
+	wantArgv := []string{"/opt/ao", "agent-process", "supervise", "--session", "mer-1", "--launch", "launch-new", "--", "codex", "resume", "agent-x", "resume atomically"}
 	if !reflect.DeepEqual(baseRuntime.lastCfg.Argv, wantArgv) {
 		t.Fatalf("resumed runtime argv = %#v, want %#v", baseRuntime.lastCfg.Argv, wantArgv)
 	}
@@ -3278,7 +3283,7 @@ func TestRestore_CodexWithoutAgentSessionIDFallsBackToSavedPrompt(t *testing.T) 
 		LookPath:  func(string) (string, error) { return "/bin/true", nil },
 	})
 
-	res, err := m.RestoreWithMode(ctx, "mer-1")
+	res, err := m.RestoreWithMode(ctx, "mer-1", "new follow-up must not replace the saved task")
 	if err != nil {
 		t.Fatalf("Restore err = %v, want fallback launch", err)
 	}
@@ -3293,6 +3298,9 @@ func TestRestore_CodexWithoutAgentSessionIDFallsBackToSavedPrompt(t *testing.T) 
 	}
 	if agent.lastLaunch.Prompt != "continue the task" {
 		t.Fatalf("fallback launch prompt = %q, want saved prompt", agent.lastLaunch.Prompt)
+	}
+	if agent.lastRestore.Prompt != "new follow-up must not replace the saved task" {
+		t.Fatalf("native restore prompt = %q, want requested follow-up", agent.lastRestore.Prompt)
 	}
 	if rt.created != 1 {
 		t.Fatalf("runtime.Create = %d, want 1", rt.created)
@@ -3414,7 +3422,7 @@ func TestRestore_AgyAndCopilotWithAgentSessionIDUseNativeResume(t *testing.T) {
 				LookPath:  func(string) (string, error) { return "/bin/true", nil },
 			})
 
-			res, err := m.RestoreWithMode(ctx, "mer-1")
+			res, err := m.RestoreWithMode(ctx, "mer-1", "codex-only follow-up")
 			if err != nil {
 				t.Fatalf("Restore err = %v, want native resume", err)
 			}
@@ -3429,6 +3437,9 @@ func TestRestore_AgyAndCopilotWithAgentSessionIDUseNativeResume(t *testing.T) {
 			}
 			if agent.launchCalls != 0 {
 				t.Fatalf("GetLaunchCommand calls = %d, want 0", agent.launchCalls)
+			}
+			if !reflect.DeepEqual(rt.lastCfg.Argv, []string{"resume"}) {
+				t.Fatalf("non-Codex native argv = %#v, want unchanged resume command", rt.lastCfg.Argv)
 			}
 			if rt.created != 1 {
 				t.Fatalf("runtime.Create = %d, want 1", rt.created)

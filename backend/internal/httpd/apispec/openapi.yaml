@@ -2435,6 +2435,11 @@ paths:
         schema:
           description: Session identifier, e.g. project-1.
           type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreSessionRequest'
       responses:
         "200":
           content:
@@ -2474,6 +2479,11 @@ paths:
         schema:
           description: Session identifier, e.g. project-1.
           type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResumeAgentRequest'
       responses:
         "200":
           content:
@@ -4545,6 +4555,12 @@ components:
       - ok
       - resolved
       type: object
+    RestoreSessionRequest:
+      properties:
+        message:
+          maxLength: 4096
+          type: string
+      type: object
     RestoreSessionResponse:
       properties:
         ok:
@@ -4564,6 +4580,12 @@ components:
       - sessionId
       - restoreMode
       - session
+      type: object
+    ResumeAgentRequest:
+      properties:
+        message:
+          maxLength: 4096
+          type: string
       type: object
     ResumeAgentResponse:
       properties:

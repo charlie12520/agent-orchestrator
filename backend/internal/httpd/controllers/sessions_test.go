@@ -29,6 +29,8 @@ import (
 type fakeSessionService struct {
 	sessions        map[domain.SessionID]domain.Session
 	sent            string
+	restoreMessage  string
+	resumeMessage   string
 	spawnCfg        ports.SpawnConfig
 	cleanupProjects []domain.ProjectID
 	cleanupSessions []domain.SessionID
@@ -188,7 +190,10 @@ func (f *fakeSessionService) CompleteOrchestrator(_ context.Context, id domain.S
 	return nil
 }
 
-func (f *fakeSessionService) Restore(_ context.Context, id domain.SessionID) (sessionsvc.RestoreOutcome, error) {
+func (f *fakeSessionService) Restore(_ context.Context, id domain.SessionID, message ...string) (sessionsvc.RestoreOutcome, error) {
+	if len(message) > 0 {
+		f.restoreMessage = message[0]
+	}
 	s := f.sessions[id]
 	s.IsTerminated = false
 	s.Status = domain.StatusIdle
@@ -196,7 +201,10 @@ func (f *fakeSessionService) Restore(_ context.Context, id domain.SessionID) (se
 	return sessionsvc.RestoreOutcome{Session: s, Mode: sessionsvc.RestoreModeView("native")}, nil
 }
 
-func (f *fakeSessionService) ResumeAgent(_ context.Context, id domain.SessionID) (sessionsvc.ResumeAgentOutcome, error) {
+func (f *fakeSessionService) ResumeAgent(_ context.Context, id domain.SessionID, message ...string) (sessionsvc.ResumeAgentOutcome, error) {
+	if len(message) > 0 {
+		f.resumeMessage = message[0]
+	}
 	s := f.sessions[id]
 	s.Activity.State = domain.ActivityIdle
 	s.Status = domain.StatusIdle
@@ -509,6 +517,9 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	if restored.SessionID != "ao-2" || restored.RestoreMode != "native" {
 		t.Fatalf("restore response = %#v", restored)
 	}
+	if svc.restoreMessage != "" {
+		t.Fatalf("empty restore body forwarded message %q", svc.restoreMessage)
+	}
 
 	body, status, _ = doRequest(t, srv, "POST", "/api/v1/sessions/ao-2/resume-agent", "")
 	if status != http.StatusOK {
@@ -521,6 +532,9 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	mustJSON(t, body, &resumed)
 	if resumed.SessionID != "ao-2" || resumed.ResumeMode != "native" {
 		t.Fatalf("resume response = %#v", resumed)
+	}
+	if svc.resumeMessage != "" {
+		t.Fatalf("empty resume body forwarded message %q", svc.resumeMessage)
 	}
 
 	body, status, _ = doRequest(t, srv, "PATCH", "/api/v1/sessions/ao-2", `{"displayName":"Renamed"}`)
@@ -561,6 +575,32 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("orchestrator = %d, want 201; body=%s", status, body)
 	}
+}
+
+func TestSessionsAPI_RelaunchForwardsOptionalMessage(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/restore", `{"message":"restore\u0000 now"}`)
+	if status != http.StatusOK || svc.restoreMessage != "restore now" {
+		t.Fatalf("restore status=%d message=%q body=%s", status, svc.restoreMessage, body)
+	}
+
+	body, status, _ = doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/resume-agent", `{"message":"resume\u0000 now"}`)
+	if status != http.StatusOK || svc.resumeMessage != "resume now" {
+		t.Fatalf("resume status=%d message=%q body=%s", status, svc.resumeMessage, body)
+	}
+}
+
+func TestSessionsAPI_RelaunchRejectsInvalidMessageBody(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/restore", `{"message":`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_JSON")
+
+	body, status, _ = doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/resume-agent", `{"message":"`+strings.Repeat("x", 4097)+`"}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "MESSAGE_TOO_LONG")
 }
 
 func TestSessionsAPI_SpawnRejectsInvalidAgentConfig(t *testing.T) {

@@ -1103,7 +1103,7 @@ func (m *Manager) retireWorkspaceProjectForReplacement(ctx context.Context, rec 
 // native resume, a saved-prompt fallback, or a fresh launch. The fallible I/O
 // runs before any durable session write, so a failure never resurrects the row
 // or destroys the worktree (it may hold the agent's prior work).
-func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID) (RestoreResult, error) {
+func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID, message ...string) (RestoreResult, error) {
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("restore %s: %w", id, err)
@@ -1136,18 +1136,18 @@ func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID) (Res
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("restore %s: workspace: %w", id, err)
 	}
-	return m.relaunchRestoredSession(ctx, rec, project, ws)
+	return m.relaunchRestoredSession(ctx, rec, project, ws, message...)
 }
 
-func (m *Manager) relaunchRestoredSession(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo) (RestoreResult, error) {
-	return m.relaunchSession(ctx, "restore", rec, project, ws, nil)
+func (m *Manager) relaunchRestoredSession(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo, message ...string) (RestoreResult, error) {
+	return m.relaunchSession(ctx, "restore", rec, project, ws, nil, message...)
 }
 
 // ResumeAgentWithMode replaces an exited agent inside its still-live session.
 // Unlike RestoreWithMode, it preserves the existing worktree and terminal
 // identity and never changes the durable terminated flag as an intermediate
 // step.
-func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) (RestoreResult, error) {
+func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID, message ...string) (RestoreResult, error) {
 	if !m.beginAgentResume(id) {
 		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrResumeInProgress)
 	}
@@ -1182,7 +1182,7 @@ func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) 
 		ProjectID: rec.ProjectID,
 	}
 	handle := ports.RuntimeHandle{ID: meta.RuntimeHandleID}
-	return m.relaunchSession(ctx, "resume agent", rec, project, ws, &handle)
+	return m.relaunchSession(ctx, "resume agent", rec, project, ws, &handle, message...)
 }
 
 func (m *Manager) beginAgentResume(id domain.SessionID) bool {
@@ -1201,7 +1201,7 @@ func (m *Manager) endAgentResume(id domain.SessionID) {
 	m.resumeMu.Unlock()
 }
 
-func (m *Manager) relaunchSession(ctx context.Context, operation string, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo, restartHandle *ports.RuntimeHandle) (RestoreResult, error) {
+func (m *Manager) relaunchSession(ctx context.Context, operation string, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo, restartHandle *ports.RuntimeHandle, message ...string) (RestoreResult, error) {
 	agent, ok := m.agents.Agent(rec.Harness)
 	if !ok {
 		return RestoreResult{}, fmt.Errorf("%s %s: no agent adapter for harness %q", operation, rec.ID, rec.Harness)
@@ -1230,7 +1230,11 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	if err := m.prepareWorkspace(ctx, agent, rec.ID, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
 	}
-	argv, delivery, mode, err := restoreArgv(ctx, agent, rec.ID, ws.Path, rec.Metadata, systemPrompt, systemPromptFile, agentConfig, rec.Kind, rec.Harness, m.dataDir)
+	resumePrompt := ""
+	if len(message) > 0 {
+		resumePrompt = message[0]
+	}
+	argv, delivery, mode, err := restoreArgv(ctx, agent, rec.ID, ws.Path, rec.Metadata, systemPrompt, systemPromptFile, agentConfig, rec.Kind, rec.Harness, resumePrompt, m.dataDir)
 	if err != nil {
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
@@ -3043,13 +3047,13 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // signals via ok=false (e.g. no native session id captured yet). Returns
 // ErrNotResumable when transcript-preserving restore is required but unavailable,
 // or when a promptless, unresumable worker has nothing to restore from.
-func restoreArgv(ctx context.Context, agent ports.Agent, id domain.SessionID, workspacePath string, meta domain.SessionMetadata, systemPrompt, systemPromptFile string, agentConfig ports.AgentConfig, kind domain.SessionKind, _ domain.AgentHarness, dataDir string) ([]string, ports.PromptDeliveryStrategy, RestoreMode, error) {
+func restoreArgv(ctx context.Context, agent ports.Agent, id domain.SessionID, workspacePath string, meta domain.SessionMetadata, systemPrompt, systemPromptFile string, agentConfig ports.AgentConfig, kind domain.SessionKind, _ domain.AgentHarness, resumePrompt, dataDir string) ([]string, ports.PromptDeliveryStrategy, RestoreMode, error) {
 	ref := ports.SessionRef{
 		ID:            string(id),
 		WorkspacePath: workspacePath,
 		Metadata:      map[string]string{ports.MetadataKeyAgentSessionID: meta.AgentSessionID},
 	}
-	cmd, ok, err := agent.GetRestoreCommand(ctx, ports.RestoreConfig{Session: ref, Kind: kind, DataDir: dataDir, SystemPrompt: systemPrompt, SystemPromptFile: systemPromptFile, Config: agentConfig, Permissions: agentConfig.Permissions})
+	cmd, ok, err := agent.GetRestoreCommand(ctx, ports.RestoreConfig{Session: ref, Kind: kind, DataDir: dataDir, Prompt: resumePrompt, SystemPrompt: systemPrompt, SystemPromptFile: systemPromptFile, Config: agentConfig, Permissions: agentConfig.Permissions})
 	if err != nil {
 		return nil, "", "", fmt.Errorf("restore command: %w", err)
 	}

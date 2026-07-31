@@ -335,12 +335,22 @@ type SetSessionMergePolicyResponse struct {
 	Session            SessionView      `json:"session"`
 }
 
+// RestoreSessionRequest is the optional body of POST /api/v1/sessions/{sessionId}/restore.
+type RestoreSessionRequest struct {
+	Message string `json:"message,omitempty" maxLength:"4096"`
+}
+
 // RestoreSessionResponse is the body of POST /api/v1/sessions/{sessionId}/restore.
 type RestoreSessionResponse struct {
 	OK          bool                       `json:"ok"`
 	SessionID   domain.SessionID           `json:"sessionId"`
 	RestoreMode sessionsvc.RestoreModeView `json:"restoreMode" enum:"native,saved_prompt,fresh"`
 	Session     SessionView                `json:"session"`
+}
+
+// ResumeAgentRequest is the optional body of POST /api/v1/sessions/{sessionId}/resume-agent.
+type ResumeAgentRequest struct {
+	Message string `json:"message,omitempty" maxLength:"4096"`
 }
 
 // ResumeAgentResponse is the body of POST /api/v1/sessions/{sessionId}/resume-agent.

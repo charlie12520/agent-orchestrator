@@ -97,10 +97,14 @@ func Build() ([]byte, error) {
 			oc.AddReqStructure(param)
 		}
 		if op.reqBody != nil {
-			// AddReqStructure leaves requestBody.required absent, which
-			// OpenAPI reads as optional. These bodies are mandatory, so force
-			// it — otherwise validators/generators treat the body as skippable.
-			oc.AddReqStructure(op.reqBody, openapi.WithCustomize(markRequestBodyRequired))
+			// AddReqStructure leaves requestBody.required absent. Preserve that
+			// only for operations whose body is intentionally optional; all
+			// other request bodies remain mandatory.
+			if op.reqBodyOptional {
+				oc.AddReqStructure(op.reqBody)
+			} else {
+				oc.AddReqStructure(op.reqBody, openapi.WithCustomize(markRequestBodyRequired))
+			}
 		}
 		for _, resp := range op.resps {
 			opts := []openapi.ContentOption{openapi.WithHTTPStatus(resp.status)}
@@ -178,7 +182,9 @@ var schemaNames = map[string]string{
 	"ControllersSetSessionMergePolicyResponse":    "SetSessionMergePolicyResponse",
 	"ControllersRenameSessionRequest":             "RenameSessionRequest",
 	"ControllersRenameSessionResponse":            "RenameSessionResponse",
+	"ControllersRestoreSessionRequest":            "RestoreSessionRequest",
 	"ControllersRestoreSessionResponse":           "RestoreSessionResponse",
+	"ControllersResumeAgentRequest":               "ResumeAgentRequest",
 	"ControllersResumeAgentResponse":              "ResumeAgentResponse",
 	"ControllersCleanupSessionsResponse":          "CleanupSessionsResponse",
 	"ControllersCleanupSkippedSession":            "CleanupSkippedSession",
@@ -356,6 +362,7 @@ type operation struct {
 	tag                       string
 	pathParams                []any // path/query param containers (e.g. ProjectIDParam)
 	reqBody                   any   // JSON request body struct, nil when the op takes none
+	reqBodyOptional           bool  // request body may be omitted entirely
 	resps                     []respUnit
 	contentTypes              map[int]string // optional non-JSON response content types by status
 }
@@ -1141,8 +1148,10 @@ func sessionOperations() []operation {
 		},
 		{
 			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/restore", id: "restoreSession", tag: "sessions",
-			summary:    "Restore a terminated session",
-			pathParams: []any{controllers.SessionIDParam{}},
+			summary:         "Restore a terminated session",
+			pathParams:      []any{controllers.SessionIDParam{}},
+			reqBody:         controllers.RestoreSessionRequest{},
+			reqBodyOptional: true,
 			resps: []respUnit{
 				{http.StatusOK, controllers.RestoreSessionResponse{}},
 				{http.StatusNotFound, envelope.APIError{}},
@@ -1152,8 +1161,10 @@ func sessionOperations() []operation {
 		},
 		{
 			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/resume-agent", id: "resumeAgent", tag: "sessions",
-			summary:    "Resume an exited agent in its existing session",
-			pathParams: []any{controllers.SessionIDParam{}},
+			summary:         "Resume an exited agent in its existing session",
+			pathParams:      []any{controllers.SessionIDParam{}},
+			reqBody:         controllers.ResumeAgentRequest{},
+			reqBodyOptional: true,
 			resps: []respUnit{
 				{http.StatusOK, controllers.ResumeAgentResponse{}},
 				{http.StatusNotFound, envelope.APIError{}},
