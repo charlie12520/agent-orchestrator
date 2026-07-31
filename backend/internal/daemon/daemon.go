@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -340,22 +341,7 @@ func RunWithOptions(opts RunOptions) error {
 		log.Error("reconcile agent processes on boot failed", "err", reconcileErr)
 	}
 
-	// ponytail: 5s tolerates a brief frontend restart; tune if dev hot-reload trips it.
-	const supervisorGrace = 5 * time.Second
-
-	if ln, addr, err := supervisor.Listen(cfg.RunFilePath); err != nil {
-		// Non-fatal: without the link the daemon still works (e.g. headless "ao start"),
-		// it just will not auto-stop when a frontend dies. Do not block startup on it.
-		log.Warn("supervisor: listener unavailable; frontend-death auto-stop disabled", "err", err)
-	} else {
-		log.Info("supervisor: listening", "addr", addr)
-		sup := supervisor.New(supervisorGrace, srv.RequestShutdown, log)
-		go func() {
-			if err := sup.Serve(ctx, ln); err != nil {
-				log.Warn("supervisor: serve stopped with error", "err", err)
-			}
-		}()
-	}
+	startFrontendDeathSupervisor(ctx, cfg.RunFilePath, managedRuntime != nil, srv.RequestShutdown, log, supervisor.Listen)
 
 	runErr := srv.Run(ctx)
 
@@ -384,6 +370,42 @@ func RunWithOptions(opts RunOptions) error {
 		log.Error("cdc pipeline shutdown", "err", err)
 	}
 	return runErr
+}
+
+type frontendSupervisorListen func(runFilePath string) (net.Listener, string, error)
+
+// startFrontendDeathSupervisor belongs only to the standalone Electron-owned
+// daemon. In managed mode SuperOrch owns daemon lifetime; arming AO's desktop
+// watcher would let an unrelated/short-lived frontend peer shut down the
+// managed daemon underneath live workers.
+func startFrontendDeathSupervisor(
+	ctx context.Context,
+	runFilePath string,
+	managed bool,
+	requestShutdown func(),
+	log *slog.Logger,
+	listen frontendSupervisorListen,
+) {
+	if managed {
+		log.Info("supervisor: frontend-death auto-stop disabled in managed mode")
+		return
+	}
+	// ponytail: 5s tolerates a brief frontend restart; tune if dev hot-reload trips it.
+	const supervisorGrace = 5 * time.Second
+	ln, addr, err := listen(runFilePath)
+	if err != nil {
+		// Non-fatal: without the link the daemon still works (e.g. headless "ao start"),
+		// it just will not auto-stop when a frontend dies. Do not block startup on it.
+		log.Warn("supervisor: listener unavailable; frontend-death auto-stop disabled", "err", err)
+		return
+	}
+	log.Info("supervisor: listening", "addr", addr)
+	sup := supervisor.New(supervisorGrace, requestShutdown, log)
+	go func() {
+		if err := sup.Serve(ctx, ln); err != nil {
+			log.Warn("supervisor: serve stopped with error", "err", err)
+		}
+	}()
 }
 
 func seedScratchProjectOnBoot(ctx context.Context, cfg config.Config, projects *projectsvc.Service) error {

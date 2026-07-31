@@ -19,6 +19,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/managedcontrol"
@@ -61,7 +62,7 @@ func NewRouterWithControl(cfg config.Config, log *slog.Logger, termMgr *terminal
 	r.Use(middleware.RequestID)
 	r.Use(func(next http.Handler) http.Handler { return markTransportScope(transportScopePrimary, next) })
 	r.Use(middleware.RealIP)
-	r.Use(primaryLoopbackAuthMiddleware(managed))
+	r.Use(primaryLoopbackAuthMiddleware(managed, deps.SessionCapabilities))
 	r.Use(requestLogger(log, deps.Telemetry))
 	r.Use(recoverTelemetry(log, deps.Telemetry))
 	r.Use(corsMiddleware(cfg.AllowedOrigins))
@@ -393,15 +394,25 @@ const (
 var (
 	strictBearerHeaderPattern = regexp.MustCompile(`^Bearer ([0-9a-f]{64})$`)
 	strictGenerationPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	strictSessionIDPattern    = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 )
 
-func primaryLoopbackAuthMiddleware(managed *managedcontrol.Runtime) func(http.Handler) http.Handler {
+const (
+	workerCapabilityHeader = "X-AO-Browser-Capability"
+	workerLaunchHeader     = "X-AO-Runtime-Launch-ID"
+)
+
+func primaryLoopbackAuthMiddleware(managed *managedcontrol.Runtime, capabilities controllers.SessionCapabilityValidator) func(http.Handler) http.Handler {
 	if managed == nil {
 		return func(next http.Handler) http.Handler { return next }
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if transportScope(r) == transportScopeLAN || isPublicManagedProbe(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if isAuthorizedWorkerActivity(r, capabilities) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -420,6 +431,34 @@ func primaryLoopbackAuthMiddleware(managed *managedcontrol.Runtime) func(http.Ha
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// isAuthorizedWorkerActivity admits exactly one least-privilege worker
+// operation without managed root authentication: the owning session may post
+// its own hook activity for its current process generation. Every other route
+// still requires the daemon root bearer and generation.
+func isAuthorizedWorkerActivity(r *http.Request, capabilities controllers.SessionCapabilityValidator) bool {
+	if capabilities == nil || r.Method != http.MethodPost || r.URL.RawQuery != "" {
+		return false
+	}
+	const prefix = "/api/v1/sessions/"
+	const suffix = "/activity"
+	path := r.URL.Path
+	if r.URL.EscapedPath() != path || !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return false
+	}
+	sessionID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if !strictSessionIDPattern.MatchString(sessionID) {
+		return false
+	}
+	capability, ok := strictSingleHeader(r, workerCapabilityHeader, strictSessionIDPattern.MatchString)
+	if !ok {
+		return false
+	}
+	if _, ok := strictSingleHeader(r, workerLaunchHeader, strictSessionIDPattern.MatchString); !ok {
+		return false
+	}
+	return capabilities.Valid(domain.SessionID(sessionID), capability)
 }
 
 func isPublicManagedProbe(r *http.Request) bool {

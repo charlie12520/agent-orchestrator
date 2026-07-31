@@ -24,6 +24,9 @@ import (
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 const (
+	activityCapabilityHeader = "X-AO-Browser-Capability"
+	activityLaunchHeader     = "X-AO-Runtime-Launch-ID"
+
 	// hooksLogName is the file under AO_DATA_DIR where hook delivery failures
 	// are appended. Agent hook runners swallow stderr, so without a durable
 	// sink a dead activity feed (e.g. an unreachable daemon) stays invisible.
@@ -161,23 +164,38 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 	}
 
 	toolName, toolUseID := activityMeta(payload)
+	launchID := validLaunchID(os.Getenv("AO_RUNTIME_LAUNCH_ID"))
 	path := "sessions/" + url.PathEscape(sessionID) + "/activity"
 	req := setActivityAPIRequest{
 		Event:          event,
 		ToolName:       toolName,
 		ToolUseID:      toolUseID,
 		AgentSessionID: agentSessionID,
-		LaunchID:       validLaunchID(os.Getenv("AO_RUNTIME_LAUNCH_ID")),
+		LaunchID:       launchID,
 	}
 	if hasActivity {
 		req.State = string(state)
 	}
-	if err := c.postJSON(ctx, path, req, nil); err != nil {
+	if err := c.postJSONWithHeaders(ctx, path, req, nil, activityRequestHeaders(launchID)); err != nil {
 		// Surface the failure for diagnosis, but exit 0: a failed activity
 		// report must not disrupt the agent.
 		c.reportHookFailure(agent, event, sessionID, err)
 	}
 	return nil
+}
+
+// activityRequestHeaders carries only the worker's existing session-scoped
+// capability plus its current process generation. The managed daemon's root
+// credential remains outside the worker environment.
+func activityRequestHeaders(launchID string) map[string]string {
+	capability := strings.TrimSpace(os.Getenv("AO_BROWSER_CAPABILITY"))
+	if capability == "" || launchID == "" {
+		return nil
+	}
+	return map[string]string{
+		activityCapabilityHeader: capability,
+		activityLaunchHeader:     launchID,
+	}
 }
 
 func validLaunchID(value string) string {

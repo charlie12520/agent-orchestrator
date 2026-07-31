@@ -15,7 +15,9 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/managedcontrol"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 const (
@@ -39,6 +41,26 @@ func managedRequest(method, path string) *http.Request {
 	req.Header.Set("Authorization", "Bearer "+managedSecretHex)
 	req.Header.Set(daemonGenerationHeader, managedGeneration)
 	return req
+}
+
+type fixedSessionCapability struct {
+	sessionID domain.SessionID
+	token     string
+}
+
+func (c fixedSessionCapability) Valid(sessionID domain.SessionID, token string) bool {
+	return sessionID == c.sessionID && token == c.token
+}
+
+type managedActivityCapture struct {
+	calls  int
+	signal ports.ActivitySignal
+}
+
+func (c *managedActivityCapture) ApplyActivitySignal(_ context.Context, _ domain.SessionID, signal ports.ActivitySignal) error {
+	c.calls++
+	c.signal = signal
+	return nil
 }
 
 func rawHTTP(t *testing.T, addr string, raw string) (int, http.Header, string) {
@@ -235,6 +257,79 @@ func TestManagedRoutesRequireStrictBearerAndGeneration(t *testing.T) {
 				t.Fatalf("body = %s, want %s", rec.Body.String(), tc.code)
 			}
 		})
+	}
+}
+
+func TestManagedWorkerActivityUsesOnlyOwningSessionCapability(t *testing.T) {
+	managed := managedRuntimeUnderTest(t)
+	activity := &managedActivityCapture{}
+	router := newManagedTestRouter(config.Config{}, discardLogger(), nil, managed, APIDeps{
+		Activity: activity,
+		SessionCapabilities: fixedSessionCapability{
+			sessionID: "ao-7",
+			token:     "capability-7",
+		},
+	}, ControlDeps{})
+
+	request := func(path, body, capability, launchID string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if capability != "" {
+			req.Header.Set(workerCapabilityHeader, capability)
+		}
+		if launchID != "" {
+			req.Header.Set(workerLaunchHeader, launchID)
+		}
+		return req
+	}
+
+	valid := httptest.NewRecorder()
+	router.ServeHTTP(valid, request(
+		"/api/v1/sessions/ao-7/activity",
+		`{"state":"idle","event":"stop","launchId":"launch-3"}`,
+		"capability-7",
+		"launch-3",
+	))
+	if valid.Code != http.StatusOK {
+		t.Fatalf("scoped activity = %d, want 200 body=%s", valid.Code, valid.Body.String())
+	}
+	if activity.calls != 1 || activity.signal.LaunchID != "launch-3" {
+		t.Fatalf("activity capture = %+v calls=%d", activity.signal, activity.calls)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		path       string
+		capability string
+		launchID   string
+	}{
+		{name: "missing capability", path: "/api/v1/sessions/ao-7/activity", launchID: "launch-3"},
+		{name: "wrong capability", path: "/api/v1/sessions/ao-7/activity", capability: "capability-other", launchID: "launch-3"},
+		{name: "missing launch", path: "/api/v1/sessions/ao-7/activity", capability: "capability-7"},
+		{name: "wrong session", path: "/api/v1/sessions/ao-8/activity", capability: "capability-7", launchID: "launch-3"},
+		{name: "query rejected", path: "/api/v1/sessions/ao-7/activity?x=1", capability: "capability-7", launchID: "launch-3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, request(tc.path, `{"state":"idle","launchId":"launch-3"}`, tc.capability, tc.launchID))
+			if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "BAD_BEARER") {
+				t.Fatalf("status = %d body=%s, want 401 BAD_BEARER", rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	mismatch := httptest.NewRecorder()
+	router.ServeHTTP(mismatch, request(
+		"/api/v1/sessions/ao-7/activity",
+		`{"state":"idle","launchId":"launch-other"}`,
+		"capability-7",
+		"launch-3",
+	))
+	if mismatch.Code != http.StatusConflict || !strings.Contains(mismatch.Body.String(), "STALE_RUNTIME_LAUNCH") {
+		t.Fatalf("mismatched launch = %d body=%s, want 409 STALE_RUNTIME_LAUNCH", mismatch.Code, mismatch.Body.String())
+	}
+	if activity.calls != 1 {
+		t.Fatalf("mismatched launch reached recorder; calls=%d", activity.calls)
 	}
 }
 

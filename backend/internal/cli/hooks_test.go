@@ -14,9 +14,11 @@ import (
 )
 
 type activityCapture struct {
-	body string
-	path string
-	hits int
+	body       string
+	path       string
+	capability string
+	launchID   string
+	hits       int
 }
 
 // activityServer accepts POST /api/v1/sessions/{id}/activity and records what
@@ -35,6 +37,8 @@ func activityServer(t *testing.T, status int, respBody string) (*httptest.Server
 		}
 		capture.body = string(body)
 		capture.path = r.URL.Path
+		capture.capability = r.Header.Get(activityCapabilityHeader)
+		capture.launchID = r.Header.Get(activityLaunchHeader)
 		capture.hits++
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -115,6 +119,7 @@ func TestHooks_SessionEndReportsExited(t *testing.T) {
 func TestHooks_ThreadsRuntimeLaunchID(t *testing.T) {
 	t.Setenv("AO_SESSION_ID", "ao-7")
 	t.Setenv("AO_RUNTIME_LAUNCH_ID", "launch-3")
+	t.Setenv("AO_BROWSER_CAPABILITY", "capability-7")
 	cfg := setConfigEnv(t)
 	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
 	writeRunFileFor(t, cfg, srv)
@@ -132,6 +137,23 @@ func TestHooks_ThreadsRuntimeLaunchID(t *testing.T) {
 	}
 	if req.LaunchID != "launch-3" {
 		t.Fatalf("launch id = %q, want launch-3", req.LaunchID)
+	}
+	if capture.capability != "capability-7" {
+		t.Fatalf("capability header = %q, want capability-7", capture.capability)
+	}
+	if capture.launchID != "launch-3" {
+		t.Fatalf("launch header = %q, want launch-3", capture.launchID)
+	}
+}
+
+func TestActivityRequestHeadersRequireBothScopedValues(t *testing.T) {
+	t.Setenv("AO_BROWSER_CAPABILITY", "capability-7")
+	if headers := activityRequestHeaders(""); headers != nil {
+		t.Fatalf("headers without launch id = %#v, want nil", headers)
+	}
+	t.Setenv("AO_BROWSER_CAPABILITY", "")
+	if headers := activityRequestHeaders("launch-3"); headers != nil {
+		t.Fatalf("headers without capability = %#v, want nil", headers)
 	}
 }
 

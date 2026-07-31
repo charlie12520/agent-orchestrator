@@ -896,6 +896,10 @@ func (c *SessionsController) activity(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
 		return
 	}
+	if scopedLaunchID := strings.TrimSpace(r.Header.Get("X-AO-Runtime-Launch-ID")); scopedLaunchID != "" && scopedLaunchID != strings.TrimSpace(in.LaunchID) {
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "STALE_RUNTIME_LAUNCH", "Worker activity generation does not match the request body", nil)
+		return
+	}
 	state := domain.ActivityState(in.State)
 	if state != "" {
 		switch state {
