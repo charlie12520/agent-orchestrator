@@ -36,7 +36,7 @@ export function daemonFailureHint(status: DaemonStatus): string {
 		case "not_ready":
 			return "The daemon has not passed its readiness check yet. Open details below for more information.";
 		case "not_configured":
-			return "Set AO_DAEMON_COMMAND or run the desktop app from a source checkout.";
+			return 'Set AO_DAEMON_ARGV to ["/path/to/ao","daemon",...] or run the desktop app from a source checkout.';
 		case "daemon_unreachable":
 		case "identity_mismatch":
 			return "Stop the conflicting daemon, then restart the desktop app.";

@@ -2,14 +2,18 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 )
 
 const mobileUnencryptedWarning = "Traffic on this connection is not encrypted. Only use it on a network you trust."
+
+const managedMobileDisabledMessage = "Connect Mobile is disabled while AO is SuperOrch-managed"
 
 type mobileBridge interface {
 	Status() MobileStatusResponse
@@ -22,6 +26,33 @@ type mobileBridge interface {
 // (status/enable/disable/regenerate) over the loopback API, delegating to a
 // mobileBridge and stamping the unencrypted-LAN warning onto every response.
 type MobileController struct{ Bridge mobileBridge }
+
+// ManagedDisabledMobileBridge is the fail-closed Connect Mobile implementation
+// used by a SuperOrch-managed daemon. It deliberately owns neither a config path
+// nor a LAN controller, so no method can persist mobile state or create a
+// network-facing listener. The ordinary BridgeService remains unchanged for
+// standalone AO daemons.
+type ManagedDisabledMobileBridge struct{}
+
+func (*ManagedDisabledMobileBridge) Status() MobileStatusResponse {
+	return MobileStatusResponse{Enabled: false}
+}
+
+func (*ManagedDisabledMobileBridge) Enable() (MobileStatusResponse, error) {
+	return MobileStatusResponse{}, managedMobileDisabledError()
+}
+
+func (*ManagedDisabledMobileBridge) Disable() error {
+	return managedMobileDisabledError()
+}
+
+func (*ManagedDisabledMobileBridge) Regenerate() (MobileStatusResponse, error) {
+	return MobileStatusResponse{}, managedMobileDisabledError()
+}
+
+func managedMobileDisabledError() error {
+	return apierr.Forbidden("MOBILE_DISABLED_MANAGED", managedMobileDisabledMessage)
+}
 
 // withWarning stamps the constant unencrypted-LAN warning onto any bridge
 // response. The warning is not bridge-specific state — it's always present —
@@ -41,7 +72,7 @@ func (c *MobileController) Status(w http.ResponseWriter, r *http.Request) {
 func (c *MobileController) Enable(w http.ResponseWriter, r *http.Request) {
 	res, err := c.Bridge.Enable()
 	if err != nil {
-		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "MOBILE_ENABLE", err.Error(), nil)
+		writeMobileError(w, r, err, "MOBILE_ENABLE")
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, withWarning(res))
@@ -50,7 +81,7 @@ func (c *MobileController) Enable(w http.ResponseWriter, r *http.Request) {
 // Disable turns the bridge off and returns the resulting status.
 func (c *MobileController) Disable(w http.ResponseWriter, r *http.Request) {
 	if err := c.Bridge.Disable(); err != nil {
-		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "MOBILE_DISABLE", err.Error(), nil)
+		writeMobileError(w, r, err, "MOBILE_DISABLE")
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, withWarning(c.Bridge.Status()))
@@ -60,10 +91,19 @@ func (c *MobileController) Disable(w http.ResponseWriter, r *http.Request) {
 func (c *MobileController) Regenerate(w http.ResponseWriter, r *http.Request) {
 	res, err := c.Bridge.Regenerate()
 	if err != nil {
-		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "MOBILE_REGEN", err.Error(), nil)
+		writeMobileError(w, r, err, "MOBILE_REGEN")
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, withWarning(res))
+}
+
+func writeMobileError(w http.ResponseWriter, r *http.Request, err error, fallbackCode string) {
+	var structured *apierr.Error
+	if errors.As(err, &structured) {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", fallbackCode, err.Error(), nil)
 }
 
 // LANController is the runtime hook set the concrete bridge needs. httpd's

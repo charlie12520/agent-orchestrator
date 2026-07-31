@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -560,6 +561,7 @@ type fakeCommander struct {
 	sent            []domain.SessionID
 	sentMessages    []string
 	cleanupProjects []domain.ProjectID
+	cleanupSessions []domain.SessionID
 	killErr         error
 	retireErr       error
 	sendErr         error
@@ -571,6 +573,8 @@ type fakeCommander struct {
 	killsAtSpawn    int
 	restoreErr      error
 	restoreResult   sessionmanager.RestoreResult
+	restoreMessages []string
+	resumeMessages  []string
 }
 
 func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
@@ -585,13 +589,15 @@ func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.
 	}
 	return domain.SessionRecord{ID: "mer-9", ProjectID: cfg.ProjectID, Kind: cfg.Kind, Harness: cfg.Harness}, len(cfg.Prompt), 0, nil
 }
-func (f *fakeCommander) RestoreWithMode(context.Context, domain.SessionID) (sessionmanager.RestoreResult, error) {
+func (f *fakeCommander) RestoreWithMode(_ context.Context, _ domain.SessionID, message ...string) (sessionmanager.RestoreResult, error) {
+	f.restoreMessages = append(f.restoreMessages, message...)
 	if f.restoreErr != nil {
 		return sessionmanager.RestoreResult{}, f.restoreErr
 	}
 	return f.restoreResult, nil
 }
-func (f *fakeCommander) ResumeAgentWithMode(context.Context, domain.SessionID) (sessionmanager.RestoreResult, error) {
+func (f *fakeCommander) ResumeAgentWithMode(_ context.Context, _ domain.SessionID, message ...string) (sessionmanager.RestoreResult, error) {
+	f.resumeMessages = append(f.resumeMessages, message...)
 	if f.restoreErr != nil {
 		return sessionmanager.RestoreResult{}, f.restoreErr
 	}
@@ -629,6 +635,13 @@ func (f *fakeCommander) Cleanup(_ context.Context, project domain.ProjectID) (se
 		Skipped: []sessionmanager.CleanupSkip{{SessionID: "mer-2", Reason: "workspace has uncommitted changes"}},
 	}, nil
 }
+func (f *fakeCommander) CleanupSession(_ context.Context, id domain.SessionID) (sessionmanager.CleanupResult, error) {
+	f.cleanupSessions = append(f.cleanupSessions, id)
+	if f.cleanupErr != nil {
+		return sessionmanager.CleanupResult{}, f.cleanupErr
+	}
+	return sessionmanager.CleanupResult{Cleaned: []domain.SessionID{id}, Skipped: []sessionmanager.CleanupSkip{}}, nil
+}
 func (f *fakeCommander) RollbackSpawn(context.Context, domain.SessionID) (bool, bool, error) {
 	return false, false, nil
 }
@@ -646,6 +659,21 @@ func TestCleanupMapsManagerResult(t *testing.T) {
 	}
 	if len(out.Skipped) != 1 || out.Skipped[0].SessionID != "mer-2" || out.Skipped[0].Reason != "workspace has uncommitted changes" {
 		t.Fatalf("skipped = %#v", out.Skipped)
+	}
+}
+
+func TestCleanupSessionMapsManagerResult(t *testing.T) {
+	fc := &fakeCommander{}
+	svc := &Service{manager: fc}
+	out, err := svc.CleanupSession(context.Background(), "mer-7")
+	if err != nil {
+		t.Fatalf("CleanupSession: %v", err)
+	}
+	if len(out.Cleaned) != 1 || out.Cleaned[0] != "mer-7" || len(out.Skipped) != 0 {
+		t.Fatalf("out = %#v", out)
+	}
+	if len(fc.cleanupSessions) != 1 || fc.cleanupSessions[0] != "mer-7" || len(fc.cleanupProjects) != 0 {
+		t.Fatalf("single=%#v bulk=%#v", fc.cleanupSessions, fc.cleanupProjects)
 	}
 }
 
@@ -1131,7 +1159,7 @@ func TestRestoreMapsManagerModeToServiceView(t *testing.T) {
 	}
 	svc := &Service{manager: fc, store: st}
 
-	got, err := svc.Restore(context.Background(), "mer-1")
+	got, err := svc.Restore(context.Background(), "mer-1", "atomic restore message")
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -1140,6 +1168,9 @@ func TestRestoreMapsManagerModeToServiceView(t *testing.T) {
 	}
 	if got.Mode != RestoreModeViewSavedPrompt {
 		t.Fatalf("mode = %q, want %q", got.Mode, RestoreModeViewSavedPrompt)
+	}
+	if !reflect.DeepEqual(fc.restoreMessages, []string{"atomic restore message"}) {
+		t.Fatalf("manager restore messages = %#v", fc.restoreMessages)
 	}
 }
 
@@ -1160,12 +1191,15 @@ func TestResumeAgentMapsManagerModeToServiceView(t *testing.T) {
 	}
 	svc := &Service{manager: fc, store: st}
 
-	got, err := svc.ResumeAgent(context.Background(), "mer-1")
+	got, err := svc.ResumeAgent(context.Background(), "mer-1", "atomic resume message")
 	if err != nil {
 		t.Fatalf("ResumeAgent: %v", err)
 	}
 	if got.Session.ID != "mer-1" || got.Mode != RestoreModeViewNative {
 		t.Fatalf("resume outcome = %+v", got)
+	}
+	if !reflect.DeepEqual(fc.resumeMessages, []string{"atomic resume message"}) {
+		t.Fatalf("manager resume messages = %#v", fc.resumeMessages)
 	}
 }
 

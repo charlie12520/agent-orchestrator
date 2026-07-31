@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 )
 
 func TestWriteReadRoundTrip(t *testing.T) {
@@ -24,6 +26,27 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	}
 	if got.PID != want.PID || got.Port != want.Port || !got.StartedAt.Equal(want.StartedAt) {
 		t.Errorf("round trip mismatch: got %+v, want %+v", *got, want)
+	}
+}
+
+func TestWriteReadRoundTripAttestation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "running.json")
+	attestation := daemonmeta.Current()
+	want := Info{PID: 4242, Port: 3001, Attestation: &attestation}
+	if err := Write(path, want); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got == nil || got.Attestation == nil {
+		t.Fatal("attestation missing after round trip")
+	}
+	if got.Attestation.Upstream.Commit != daemonmeta.UpstreamCommit ||
+		got.Attestation.Protocols.DatabaseSchema != daemonmeta.DatabaseSchemaVersion ||
+		!got.Attestation.Capabilities["runfileAttestation"] {
+		t.Fatalf("attestation = %+v", got.Attestation)
 	}
 }
 

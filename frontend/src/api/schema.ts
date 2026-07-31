@@ -123,6 +123,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/execution/bindings/{externalRunId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read one sanitized durable execution run binding */
+        get: operations["getExecutionBinding"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/execution/operations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Accept or exactly replay one managed execution mutation */
+        post: operations["executeOperation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/execution/operations/{operationId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read one sanitized durable execution operation */
+        get: operations["getExecutionOperation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/import": {
         parameters: {
             query?: never;
@@ -135,6 +186,57 @@ export interface paths {
         put?: never;
         /** Run the legacy AO project import through the daemon store */
         post: operations["runImport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/merge-leases": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Issue one bounded, root-authenticated integration lease */
+        post: operations["issueIntegrationMergeLease"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/merge-leases/{leaseId}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke an active integration lease exactly once */
+        post: operations["revokeIntegrationMergeLease"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/integration/merges": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Consume a lease and SHA-bound merge through the configured broker */
+        post: operations["consumeIntegrationMerge"];
         delete?: never;
         options?: never;
         head?: never;
@@ -409,7 +511,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Squash-merge a pull request */
+        /** Legacy PR merge placeholder (not the integration gate) */
         post: operations["mergePR"];
         delete?: never;
         options?: never;
@@ -515,6 +617,23 @@ export interface paths {
         put?: never;
         /** Report an agent activity-state signal for a session */
         post: operations["setSessionActivity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{sessionId}/cleanup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clean up one terminated session workspace */
+        post: operations["cleanupSession"];
         delete?: never;
         options?: never;
         head?: never;
@@ -948,8 +1067,18 @@ export interface components {
             ok: boolean;
             sessionId: string;
         };
+        ConsumeIntegrationMergeRequest: {
+            gateCapability: string;
+            idempotencyKey: string;
+            integrationLease: string;
+            manualApproval: boolean;
+        };
+        ConsumeIntegrationMergeResponse: {
+            outcome: components["schemas"]["IntegrationMergeOutcome"];
+        };
         ControllersSessionView: {
             activity: components["schemas"]["DomainActivity"];
+            agentConfig?: components["schemas"]["AgentConfig"];
             branch?: string;
             /** Format: date-time */
             createdAt: string;
@@ -963,6 +1092,7 @@ export interface components {
             previewRevision?: number;
             previewUrl?: string;
             projectId: string;
+            prompt?: string;
             prs: components["schemas"]["SessionPRFacts"][];
             /** @enum {string} */
             scmStatus?: "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged";
@@ -972,6 +1102,7 @@ export interface components {
             terminateOnPrMerge: boolean;
             /** Format: date-time */
             updatedAt: string;
+            workspacePath?: string;
         };
         ControllersSpawnAttachmentInput: {
             data: string;
@@ -1016,6 +1147,73 @@ export interface components {
         DomainReviewerConfig: {
             harness: string;
         };
+        ExecuteOperationRequest: {
+            /** Format: int64 */
+            expectedProcessGeneration?: number;
+            externalRunId: string;
+            idempotencyKey: string;
+            /** @enum {string} */
+            operation: "launch" | "send" | "interrupt" | "resume" | "restore" | "stop" | "cleanup";
+            request: {
+                [key: string]: unknown;
+            };
+            runId?: string;
+            /** @enum {integer} */
+            version: 1;
+        };
+        ExecuteOperationResponse: {
+            externalRunId: string;
+            /** @enum {string} */
+            operation: "launch" | "send" | "interrupt" | "resume" | "restore" | "stop" | "cleanup";
+            operationId: string;
+            /** Format: int64 */
+            processGeneration: number;
+            replayed: boolean;
+            runId?: string;
+            /** @enum {string} */
+            state: "accepted" | "dispatched" | "result" | "ambiguous";
+            /** @enum {integer} */
+            version: 1;
+        };
+        ExecutionBindingResponse: {
+            /** Format: date-time */
+            createdAt: string;
+            externalRunId: string;
+            pendingOperationId?: string;
+            /** Format: int64 */
+            processGeneration: number;
+            runId?: string;
+            /** @enum {string} */
+            state: "launching" | "active" | "stopped" | "cleaned" | "busy" | "ambiguous";
+            /** Format: date-time */
+            updatedAt: string;
+            /** @enum {integer} */
+            version: 1;
+        };
+        ExecutionOperationResponse: {
+            /** Format: date-time */
+            acceptedAt: string;
+            /** Format: date-time */
+            completedAt?: string;
+            /** Format: date-time */
+            dispatchedAt?: string;
+            /** Format: int64 */
+            expectedProcessGeneration?: number;
+            externalRunId: string;
+            /** @enum {string} */
+            operation: "launch" | "send" | "interrupt" | "resume" | "restore" | "stop" | "cleanup";
+            operationId: string;
+            /** Format: int64 */
+            resultProcessGeneration?: number;
+            resultRunId?: string;
+            runId?: string;
+            /** @enum {string} */
+            state: "accepted" | "dispatched" | "result" | "ambiguous";
+            /** Format: int64 */
+            targetProcessGeneration: number;
+            /** @enum {integer} */
+            version: 1;
+        };
         ImportReport: {
             dryRun: boolean;
             notes?: string[];
@@ -1034,6 +1232,96 @@ export interface components {
         };
         InitializeRepositoryResult: {
             path: string;
+        };
+        IntegrationCheckEvidence: {
+            /** Format: date-time */
+            completedAt?: string;
+            headSha: string;
+            name: string;
+            /** @enum {string} */
+            status: "passing" | "pending" | "failing";
+        };
+        IntegrationCheckPolicy: {
+            requireAllObservedPassing: boolean;
+            requiredChecks: string[];
+            revision: string;
+        };
+        IntegrationMergeOutcome: {
+            /** Format: date-time */
+            acceptedAt: string;
+            baseBranch: string;
+            baseRepository: string;
+            checkPolicy: components["schemas"]["IntegrationCheckPolicy"];
+            checks: components["schemas"]["IntegrationCheckEvidence"][];
+            /** Format: date-time */
+            completedAt: string;
+            /** Format: date-time */
+            dispatchedAt?: string;
+            expectedHeadSha: string;
+            idempotencyKey: string;
+            mergeCommitSha?: string;
+            mergeStrategy: string;
+            prNumber: number;
+            reason?: string;
+            repository: string;
+            reviewPolicy: components["schemas"]["IntegrationReviewPolicy"];
+            reviews: components["schemas"]["IntegrationReviewEvidence"][];
+            sourceBranch: string;
+            sourceRepository: string;
+            /** @enum {string} */
+            status: "merged" | "revalidation_required" | "ambiguous";
+            unresolvedReviewThreads: number;
+            version: number;
+        };
+        IntegrationReviewEvidence: {
+            /** @enum {string} */
+            decision: "approved" | "changes_requested" | "commented" | "dismissed";
+            headSha: string;
+            reviewer: string;
+            /** Format: date-time */
+            submittedAt: string;
+        };
+        IntegrationReviewPolicy: {
+            requireResolvedThreads: boolean;
+            requiredApprovals: number;
+            requiredReviewers: string[];
+            revision: string;
+        };
+        IssueIntegrationMergeLeaseRequest: {
+            baseBranch: string;
+            baseRepository: string;
+            checkPolicy: components["schemas"]["IntegrationCheckPolicy"];
+            expectedHeadSha: string;
+            /** Format: date-time */
+            expiresAt?: string;
+            manualApprovalRequired: boolean;
+            /** @enum {string} */
+            mergeStrategy?: "squash" | "merge" | "rebase";
+            prNumber: number;
+            repository: string;
+            reviewPolicy: components["schemas"]["IntegrationReviewPolicy"];
+            sourceBranch: string;
+            sourceRepository: string;
+        };
+        IssueIntegrationMergeLeaseResponse: {
+            baseBranch: string;
+            baseRepository: string;
+            checkPolicy: components["schemas"]["IntegrationCheckPolicy"];
+            expectedHeadSha: string;
+            /** Format: date-time */
+            expiresAt: string;
+            gateCapability: string;
+            integrationLease: string;
+            /** Format: date-time */
+            issuedAt: string;
+            manualApprovalRequired: boolean;
+            mergeStrategy: string;
+            prNumber: number;
+            repository: string;
+            reviewPolicy: components["schemas"]["IntegrationReviewPolicy"];
+            sourceBranch: string;
+            sourceRepository: string;
+            version: number;
         };
         KillSessionResponse: {
             freed?: boolean;
@@ -1254,12 +1542,18 @@ export interface components {
             ok: boolean;
             resolved: number;
         };
+        RestoreSessionRequest: {
+            message?: string;
+        };
         RestoreSessionResponse: {
             ok: boolean;
             /** @enum {string} */
             restoreMode: "native" | "saved_prompt" | "fresh";
             session: components["schemas"]["ControllersSessionView"];
             sessionId: string;
+        };
+        ResumeAgentRequest: {
+            message?: string;
         };
         ResumeAgentResponse: {
             ok: boolean;
@@ -1289,6 +1583,14 @@ export interface components {
             review: components["schemas"]["ReviewRun"];
             reviewerHandleId: string;
             reviews: components["schemas"]["ReviewRun"][];
+        };
+        RevokeIntegrationMergeLeaseResponse: {
+            integrationLease: string;
+            /** Format: date-time */
+            revokedAt: string;
+            /** @enum {string} */
+            status: "revoked";
+            version: number;
         };
         RoleOverride: {
             agent?: string;
@@ -1474,6 +1776,7 @@ export interface components {
             orchestrator: components["schemas"]["OrchestratorResponse"];
         };
         SpawnSessionRequest: {
+            agentConfig?: components["schemas"]["AgentConfig"];
             attachments?: components["schemas"]["ControllersSpawnAttachmentInput"][];
             branch?: string;
             displayName?: string;
@@ -1969,6 +2272,244 @@ export interface operations {
             };
         };
     };
+    getExecutionBinding: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Exact managed-daemon bearer credential. */
+                Authorization: string;
+                /** @description Exact current managed-daemon generation. */
+                "X-AO-Daemon-Generation": string;
+            };
+            path: {
+                externalRunId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionBindingResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    executeOperation: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Exact managed-daemon bearer credential. */
+                Authorization: string;
+                /** @description Exact current managed-daemon generation. */
+                "X-AO-Daemon-Generation": string;
+                /** @description Must exactly equal the canonical request body's idempotencyKey. */
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExecuteOperationRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecuteOperationResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Request Entity Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    getExecutionOperation: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Exact managed-daemon bearer credential. */
+                Authorization: string;
+                /** @description Exact current managed-daemon generation. */
+                "X-AO-Daemon-Generation": string;
+            };
+            path: {
+                operationId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExecutionOperationResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     getImportStatus: {
         parameters: {
             query?: never;
@@ -2036,6 +2577,266 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    issueIntegrationMergeLease: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IssueIntegrationMergeLeaseRequest"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueIntegrationMergeLeaseResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    revokeIntegrationMergeLease: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque SuperOrch-issued integration lease id. */
+                leaseId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokeIntegrationMergeLeaseResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    consumeIntegrationMerge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsumeIntegrationMergeRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsumeIntegrationMergeResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Gone */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3327,7 +4128,12 @@ export interface operations {
     setSessionActivity: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Opaque browser capability injected into the owning AO worker. */
+                "X-AO-Browser-Capability"?: string;
+                /** @description Current supervised AO worker process generation. */
+                "X-AO-Runtime-Launch-ID"?: string;
+            };
             path: {
                 /** @description Session identifier, e.g. project-1. */
                 sessionId: string;
@@ -3356,6 +4162,65 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Implemented */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    cleanupSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CleanupSessionsResponse"];
                 };
             };
             /** @description Not Found */
@@ -4107,7 +4972,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RestoreSessionRequest"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {
@@ -4157,7 +5026,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ResumeAgentRequest"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {

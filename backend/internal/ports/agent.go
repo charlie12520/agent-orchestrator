@@ -249,6 +249,9 @@ type RestoreConfig struct {
 	Kind        domain.SessionKind
 	Permissions PermissionMode
 	Session     SessionRef
+	// Prompt is an optional first user message to deliver atomically with a
+	// native resume command when the agent CLI supports that form.
+	Prompt string
 	// SystemPrompt carries the session's standing instructions (e.g. the
 	// orchestrator role). Agent CLIs rebuild their system prompt from flags on
 	// resume — it is not part of the transcript — so adapters whose CLI has a

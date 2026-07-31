@@ -77,6 +77,23 @@ func readFrame(t *testing.T, c *websocket.Conn, ch, typ string, d time.Duration)
 	}
 }
 
+func TestMuxUpgradeAdvertisesProtocolVersion(t *testing.T) {
+	mgr := terminal.NewManager(&stubSource{}, nil, discardLogger())
+	defer mgr.Close()
+	router := newTestRouter(config.Config{}, discardLogger(), mgr)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+	url := "ws" + strings.TrimPrefix(ts.URL, "http") + "/mux"
+	c, resp, err := websocket.Dial(context.Background(), url, nil)
+	if err != nil {
+		t.Fatalf("dial /mux: %v", err)
+	}
+	defer func() { _ = c.Close(websocket.StatusNormalClosure, "test done") }()
+	if got := resp.Header.Get("X-AO-Terminal-Mux-Version"); got != "1" {
+		t.Fatalf("X-AO-Terminal-Mux-Version = %q, want 1", got)
+	}
+}
+
 func TestMuxUpgradeStreamsTerminal(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PTY spawning not supported on Windows")

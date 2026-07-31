@@ -540,6 +540,7 @@ func TestMarkSpawnedStoresRuntimeMetadata(t *testing.T) {
 		RuntimeHandleID:   "h1",
 		AgentSessionID:    "agent",
 		Prompt:            "prompt",
+		AgentConfig:       &domain.AgentConfig{Model: "gpt-5.6-terra", Permissions: domain.PermissionModeBypassPermissions},
 	}
 	if err := m.MarkSpawned(ctx, "mer-1", metadata); err != nil {
 		t.Fatal(err)
@@ -550,6 +551,9 @@ func TestMarkSpawnedStoresRuntimeMetadata(t *testing.T) {
 	}
 	if got.Metadata.WorkspaceRepoPath != metadata.WorkspaceRepoPath {
 		t.Fatalf("workspace repo path = %q, want %q", got.Metadata.WorkspaceRepoPath, metadata.WorkspaceRepoPath)
+	}
+	if got.Metadata.AgentConfig == nil || *got.Metadata.AgentConfig != *metadata.AgentConfig {
+		t.Fatalf("agent config = %+v, want %+v", got.Metadata.AgentConfig, metadata.AgentConfig)
 	}
 }
 

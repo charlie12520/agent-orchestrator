@@ -7,14 +7,32 @@
 # shipped in each npm tarball via that package's `files` entry.
 #
 # CGO-free build (modernc.org/sqlite driver) so cross-compilation needs no C
-# toolchain. Prod build: no -ldflags, so cli.releaseRepo keeps its default
-# (AgentWrapper/agent-orchestrator).
+# toolchain. These binaries are publishable release artifacts, so every one is
+# stamped with the exact package version, fork commit, and compatibility mode.
 set -euo pipefail
 
 # Repo layout: this script lives at <repo>/packages/build-binaries.sh.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BACKEND_DIR="${REPO_ROOT}/backend"
+BUILD_VERSION="${AO_BUILD_VERSION:-$(cd "${REPO_ROOT}" && node -p "require('./frontend/package.json').version")}"
+BUILD_MODE="${AO_BUILD_MODE:-release}"
+FORK_COMMIT="$(AO_BUILD_MODE="${BUILD_MODE}" node "${REPO_ROOT}/frontend/scripts/build-provenance.mjs")"
+
+if [[ "${BUILD_VERSION}" =~ ^(dev|development|unknown)$ || ! "${BUILD_VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+  printf 'AO_BUILD_VERSION must be explicit and linker-safe, got %s\n' "${BUILD_VERSION}" >&2
+  exit 1
+fi
+if [[ ! "${FORK_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'AO_FORK_COMMIT must be a lowercase full 40-character SHA, got %s\n' "${FORK_COMMIT}" >&2
+  exit 1
+fi
+if [[ "${BUILD_MODE}" != "release" ]]; then
+  printf 'npm platform binaries must use AO_BUILD_MODE=release, got %s\n' "${BUILD_MODE}" >&2
+  exit 1
+fi
+BUILD_PACKAGE="github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
+LDFLAGS="-X ${BUILD_PACKAGE}.BuildVersion=${BUILD_VERSION} -X ${BUILD_PACKAGE}.ForkCommit=${FORK_COMMIT} -X ${BUILD_PACKAGE}.BuildMode=${BUILD_MODE}"
 
 # pkg_dir : npm_os : npm_arch : GOOS : GOARCH : bin_name
 TARGETS=(
@@ -31,7 +49,7 @@ for t in "${TARGETS[@]}"; do
   mkdir -p "${SCRIPT_DIR}/${pkg}/bin"
   echo "  -> ${pkg} (GOOS=${goos} GOARCH=${goarch}) -> bin/${bin}"
   (cd "${BACKEND_DIR}" && CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
-    go build -o "${out}" ./cmd/ao)
+    go build -trimpath -buildvcs=false -ldflags "${LDFLAGS}" -o "${out}" ./cmd/ao)
   chmod 0755 "${out}"
 done
 

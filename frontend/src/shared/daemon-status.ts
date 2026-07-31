@@ -13,6 +13,7 @@ export type DaemonFailureCode =
 	| "port_unconfirmed"
 	| "not_ready"
 	| "identity_mismatch"
+	| "compatibility_mismatch"
 	| "datadir_unwritable";
 
 export type DaemonStatus = {

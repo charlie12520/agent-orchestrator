@@ -130,9 +130,9 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 }
 
 // GetRestoreCommand rebuilds the argv that continues an existing Codex
-// session: `codex resume <agentSessionId>`. ok is false when the hook-derived
-// native session id has not landed yet, so callers can fall back to fresh
-// launch behavior.
+// session: `codex resume <agentSessionId> [prompt]`. ok is false when the
+// hook-derived native session id has not landed yet, so callers can fall back
+// to fresh launch behavior.
 func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig) (cmd []string, ok bool, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -163,6 +163,9 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 		cmd = append(cmd, "-c", "model_instructions_file="+cfg.SystemPromptFile)
 	}
 	cmd = append(cmd, agentSessionID)
+	if cfg.Prompt != "" {
+		cmd = append(cmd, cfg.Prompt)
+	}
 	return cmd, true, nil
 }
 

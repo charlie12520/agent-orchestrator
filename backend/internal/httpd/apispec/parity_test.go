@@ -14,6 +14,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
+	"github.com/aoagents/agent-orchestrator/backend/internal/managedcontrol"
 )
 
 // TestRouteSpecParity asserts the mounted /api/v1 routes and the OpenAPI
@@ -26,10 +27,15 @@ func TestRouteSpecParity(t *testing.T) {
 	// routes here — otherwise the mobile spec operations below would have no
 	// mounted route to match.
 	deps := httpd.APIDeps{Mobile: &controllers.MobileController{}}
-	router := httpd.NewRouterWithControl(config.Config{}, log, nil, deps, httpd.ControlDeps{})
+	managed, err := managedcontrol.Load(strings.NewReader(`{"version":1,"rootSecretHex":"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff","generation":"spec-parity-1"}`))
+	if err != nil {
+		t.Fatalf("load managed runtime: %v", err)
+	}
+	defer managed.Close()
+	router := httpd.NewRouterWithControl(config.Config{}, log, nil, managed, deps, httpd.ControlDeps{})
 
 	mounted := map[string]bool{}
-	err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+	err = chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		if strings.HasPrefix(route, "/api/v1/") && route != "/api/v1/openapi.yaml" {
 			mounted[strings.ToUpper(method)+" "+route] = true
 		}

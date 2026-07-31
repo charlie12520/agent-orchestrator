@@ -83,7 +83,7 @@ func (c *commandContext) reportSupervisedExit(sessionID, launchID string) {
 	defer cancel()
 	path := "sessions/" + sessionID + "/activity"
 	req := setActivityAPIRequest{State: "exited", Event: "process-exited", LaunchID: launchID}
-	if err := c.postJSON(ctx, path, req, nil); err != nil {
+	if err := c.postJSONWithHeaders(ctx, path, req, nil, activityRequestHeaders(launchID)); err != nil {
 		// Reconciliation will recover this event from process absence. Keep the
 		// delivery failure visible without preventing the terminal's shell.
 		c.reportHookFailure("agent-process", "process-exited", sessionID, err)

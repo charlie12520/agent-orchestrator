@@ -32,6 +32,11 @@ type SessionMetadata struct {
 	RuntimeLaunchID   string `json:"runtimeLaunchId,omitempty"`
 	AgentSessionID    string `json:"agentSessionId,omitempty"`
 	Prompt            string `json:"prompt,omitempty"`
+	// AgentConfig is the effective model/permissions frozen when the session
+	// launches. A non-nil zero value is intentional: it prevents a later
+	// project-config change from changing how this session resumes. Nil is
+	// reserved for sessions created before this launch-spec field existed.
+	AgentConfig *AgentConfig `json:"agentConfig,omitempty"`
 	// PreviewURL is the browser preview target the desktop app opens for this
 	// session. Set via `ao preview` (POST /sessions/{id}/preview); persisted so
 	// it survives a daemon restart. Empty means no preview has been requested.

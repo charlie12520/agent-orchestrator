@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/processalive"
 )
 
@@ -37,6 +38,10 @@ type Info struct {
 	// BrowserRuntimeAddress is the exact Unix socket or Windows named-pipe
 	// address selected by the backend for this daemon launch.
 	BrowserRuntimeAddress string `json:"browserRuntimeAddress,omitempty"`
+	// Attestation identifies the exact fork build and every protocol/storage
+	// contract exposed by the daemon. Daemon-written runfiles always include it;
+	// omitempty keeps historical fixtures and stale upstream runfiles readable.
+	Attestation *daemonmeta.Attestation `json:"attestation,omitempty"`
 }
 
 // Write atomically writes running.json at path, creating parent directories

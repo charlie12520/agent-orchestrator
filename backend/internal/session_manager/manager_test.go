@@ -296,15 +296,20 @@ func (fakeAgent) SessionInfo(context.Context, ports.SessionRef) (ports.SessionIn
 
 type launchArgvAgent struct {
 	fakeAgent
-	argv []string
+	argv                []string
+	appendRestorePrompt bool
 }
 
 func (a launchArgvAgent) GetLaunchCommand(context.Context, ports.LaunchConfig) ([]string, error) {
 	return a.argv, nil
 }
 
-func (a launchArgvAgent) GetRestoreCommand(context.Context, ports.RestoreConfig) ([]string, bool, error) {
-	return a.argv, true, nil
+func (a launchArgvAgent) GetRestoreCommand(_ context.Context, cfg ports.RestoreConfig) ([]string, bool, error) {
+	argv := append([]string(nil), a.argv...)
+	if a.appendRestorePrompt && cfg.Prompt != "" {
+		argv = append(argv, cfg.Prompt)
+	}
+	return argv, true, nil
 }
 
 type supervisedLaunchAgent struct{ launchArgvAgent }
@@ -813,6 +818,9 @@ func TestSpawn_ResolvesProjectConfig(t *testing.T) {
 	if agent.lastConfig.Model != "worker-model" {
 		t.Fatalf("launch model = %q, want role override worker-model", agent.lastConfig.Model)
 	}
+	if rec.Metadata.AgentConfig == nil || rec.Metadata.AgentConfig.Model != "worker-model" {
+		t.Fatalf("stored agent config = %#v, want effective worker config", rec.Metadata.AgentConfig)
+	}
 	if rec.Harness != domain.HarnessCodex {
 		t.Fatalf("harness = %q, want codex from role override", rec.Harness)
 	}
@@ -835,6 +843,48 @@ func TestSpawn_ResolvesProjectConfig(t *testing.T) {
 	}
 	if !agent.lastConfig.IsZero() {
 		t.Fatalf("launch config = %#v, want zero for project without config", agent.lastConfig)
+	}
+}
+
+func TestSpawn_PerSessionAgentConfigPersistsAcrossRestore(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: domain.ProjectConfig{
+		AgentConfig: domain.AgentConfig{Model: "base-model", Permissions: domain.PermissionModeAcceptEdits},
+		Worker:      domain.RoleOverride{Harness: domain.HarnessCodex, AgentConfig: domain.AgentConfig{Model: "worker-model"}},
+	}}
+	agent := &recordingAgent{}
+	m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: func(string) (string, error) { return "/bin/true", nil }})
+	override := &domain.AgentConfig{Model: "session-model", Permissions: domain.PermissionModeAuto}
+
+	rec, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, AgentConfig: override})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := domain.AgentConfig{Model: "session-model", Permissions: domain.PermissionModeAuto}
+	if agent.lastConfig != want || rec.Metadata.AgentConfig == nil || *rec.Metadata.AgentConfig != want {
+		t.Fatalf("launch=%#v stored=%#v, want %#v", agent.lastConfig, rec.Metadata.AgentConfig, want)
+	}
+
+	// Project defaults may change after launch; this session must keep its
+	// frozen effective config when restored.
+	project := st.projects["mer"]
+	project.Config.AgentConfig = domain.AgentConfig{Model: "new-base", Permissions: domain.PermissionModeBypassPermissions}
+	project.Config.Worker.AgentConfig = domain.AgentConfig{Model: "new-worker"}
+	st.projects["mer"] = project
+	terminal := st.sessions[rec.ID]
+	terminal.IsTerminated = true
+	terminal.Metadata.AgentSessionID = "native-session"
+	st.sessions[rec.ID] = terminal
+
+	restored, err := m.RestoreWithMode(ctx, rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.lastRestore.Config != want {
+		t.Fatalf("restore config = %#v, want frozen %#v", agent.lastRestore.Config, want)
+	}
+	if restored.Session.Metadata.AgentConfig == nil || *restored.Session.Metadata.AgentConfig != want {
+		t.Fatalf("restored stored config = %#v, want %#v", restored.Session.Metadata.AgentConfig, want)
 	}
 }
 
@@ -872,7 +922,7 @@ func TestRestore_RotatesSupervisedAgentGeneration(t *testing.T) {
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
 	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", AgentSessionID: "agent-x", RuntimeLaunchID: "launch-old"})
 	rt := &fakeRuntime{}
-	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}}}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}, appendRestorePrompt: true}}
 	m := New(Deps{
 		Runtime: rt, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st,
 		Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
@@ -881,7 +931,7 @@ func TestRestore_RotatesSupervisedAgentGeneration(t *testing.T) {
 		NewLaunchID: func() string { return "launch-new" },
 	})
 
-	result, err := m.RestoreWithMode(ctx, "mer-1")
+	result, err := m.RestoreWithMode(ctx, "mer-1", "continue atomically")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -891,7 +941,7 @@ func TestRestore_RotatesSupervisedAgentGeneration(t *testing.T) {
 	if got := rt.lastCfg.Env[EnvRuntimeLaunchID]; got != "launch-new" {
 		t.Fatalf("restored launch env = %q, want launch-new", got)
 	}
-	wantArgv := []string{"/opt/ao", "agent-process", "supervise", "--session", "mer-1", "--launch", "launch-new", "--", "codex", "resume", "agent-x"}
+	wantArgv := []string{"/opt/ao", "agent-process", "supervise", "--session", "mer-1", "--launch", "launch-new", "--", "codex", "resume", "agent-x", "continue atomically"}
 	if !reflect.DeepEqual(rt.lastCfg.Argv, wantArgv) {
 		t.Fatalf("restored runtime argv = %#v, want %#v", rt.lastCfg.Argv, wantArgv)
 	}
@@ -931,7 +981,7 @@ func newExitedResumeManager(t *testing.T, runtime runtimeController, agent ports
 func TestResumeAgent_RestartsRuntimeWithManagedGeneration(t *testing.T) {
 	baseRuntime := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}}
 	runtime := &fakeRestartRuntime{fakeRuntime: baseRuntime}
-	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}}}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}, appendRestorePrompt: true}}
 	m, st, ws := newExitedResumeManager(t, runtime, agent)
 	lcm := m.lcm.(*fakeLCM)
 	runtime.onRestart = func() {
@@ -940,7 +990,7 @@ func TestResumeAgent_RestartsRuntimeWithManagedGeneration(t *testing.T) {
 		}
 	}
 
-	result, err := m.ResumeAgentWithMode(ctx, "mer-1")
+	result, err := m.ResumeAgentWithMode(ctx, "mer-1", "resume atomically")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -953,7 +1003,7 @@ func TestResumeAgent_RestartsRuntimeWithManagedGeneration(t *testing.T) {
 	if ws.lastCfg.SessionID != "" || len(ws.calls) != 0 {
 		t.Fatalf("resume should not restore or recreate workspace: cfg=%+v calls=%v", ws.lastCfg, ws.calls)
 	}
-	wantArgv := []string{"/opt/ao", "agent-process", "supervise", "--session", "mer-1", "--launch", "launch-new", "--", "codex", "resume", "agent-x"}
+	wantArgv := []string{"/opt/ao", "agent-process", "supervise", "--session", "mer-1", "--launch", "launch-new", "--", "codex", "resume", "agent-x", "resume atomically"}
 	if !reflect.DeepEqual(baseRuntime.lastCfg.Argv, wantArgv) {
 		t.Fatalf("resumed runtime argv = %#v, want %#v", baseRuntime.lastCfg.Argv, wantArgv)
 	}
@@ -2222,6 +2272,26 @@ func TestCleanup_ReclaimsTerminalWorkspaces(t *testing.T) {
 	}
 }
 
+func TestCleanupSession_ReclaimsOnlyRequestedTerminalWorkspace(t *testing.T) {
+	m, st, _, ws := newManager()
+	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
+	seedTerminal(st, "mer-2", domain.SessionMetadata{WorkspacePath: "/ws/mer-2"})
+
+	res, err := m.CleanupSession(ctx, "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Cleaned) != 1 || res.Cleaned[0] != "mer-1" || len(res.Skipped) != 0 {
+		t.Fatalf("result = %#v", res)
+	}
+	if ws.destroyed != 1 || ws.lastDestroyInfo.SessionID != "mer-1" {
+		t.Fatalf("destroyed=%d last=%#v, want only mer-1", ws.destroyed, ws.lastDestroyInfo)
+	}
+	if _, ok := st.sessions["mer-2"]; !ok {
+		t.Fatal("unrelated session was removed")
+	}
+}
+
 // TestCleanup_ClosesScopedShellTerminalsBeforeWorkspaceTeardown mirrors the
 // Kill regression: Cleanup must also gate shut a session's scoped shell
 // terminals before reclaiming its worktree, and release the gate afterward.
@@ -2490,6 +2560,7 @@ func TestSpawn_DefaultsBranchFromSessionID(t *testing.T) {
 func TestSpawn_DefaultsBranchUnderDevNamespaceForDevDataDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	m, st, _, _ := newManager()
 	m.dataDir = filepath.Join(home, ".ao", "dev", "data")
 
@@ -3212,7 +3283,7 @@ func TestRestore_CodexWithoutAgentSessionIDFallsBackToSavedPrompt(t *testing.T) 
 		LookPath:  func(string) (string, error) { return "/bin/true", nil },
 	})
 
-	res, err := m.RestoreWithMode(ctx, "mer-1")
+	res, err := m.RestoreWithMode(ctx, "mer-1", "new follow-up must not replace the saved task")
 	if err != nil {
 		t.Fatalf("Restore err = %v, want fallback launch", err)
 	}
@@ -3227,6 +3298,9 @@ func TestRestore_CodexWithoutAgentSessionIDFallsBackToSavedPrompt(t *testing.T) 
 	}
 	if agent.lastLaunch.Prompt != "continue the task" {
 		t.Fatalf("fallback launch prompt = %q, want saved prompt", agent.lastLaunch.Prompt)
+	}
+	if agent.lastRestore.Prompt != "new follow-up must not replace the saved task" {
+		t.Fatalf("native restore prompt = %q, want requested follow-up", agent.lastRestore.Prompt)
 	}
 	if rt.created != 1 {
 		t.Fatalf("runtime.Create = %d, want 1", rt.created)
@@ -3348,7 +3422,7 @@ func TestRestore_AgyAndCopilotWithAgentSessionIDUseNativeResume(t *testing.T) {
 				LookPath:  func(string) (string, error) { return "/bin/true", nil },
 			})
 
-			res, err := m.RestoreWithMode(ctx, "mer-1")
+			res, err := m.RestoreWithMode(ctx, "mer-1", "codex-only follow-up")
 			if err != nil {
 				t.Fatalf("Restore err = %v, want native resume", err)
 			}
@@ -3363,6 +3437,9 @@ func TestRestore_AgyAndCopilotWithAgentSessionIDUseNativeResume(t *testing.T) {
 			}
 			if agent.launchCalls != 0 {
 				t.Fatalf("GetLaunchCommand calls = %d, want 0", agent.launchCalls)
+			}
+			if !reflect.DeepEqual(rt.lastCfg.Argv, []string{"resume"}) {
+				t.Fatalf("non-Codex native argv = %#v, want unchanged resume command", rt.lastCfg.Argv)
 			}
 			if rt.created != 1 {
 				t.Fatalf("runtime.Create = %d, want 1", rt.created)
@@ -4123,7 +4200,12 @@ func TestSpawnAndRestore_PrependsResolvedBinaryAndNodeDirsToRuntimePATH(t *testi
 			t.Fatal(err)
 		}
 	}
-	want := strings.Join([]string{binDir, nodeDir, filepath.Dir(daemonExe), "/usr/bin"}, string(os.PathListSeparator))
+	wantPath := []string{binDir}
+	if runtime.GOOS != "windows" {
+		wantPath = append(wantPath, nodeDir)
+	}
+	wantPath = append(wantPath, filepath.Dir(daemonExe), "/usr/bin")
+	want := strings.Join(wantPath, string(os.PathListSeparator))
 
 	for _, operation := range []string{"spawn", "restore"} {
 		t.Run(operation, func(t *testing.T) {
@@ -4169,6 +4251,7 @@ func TestSpawn_DoesNotAddNodeRuntimeForNativeBinary(t *testing.T) {
 	home := t.TempDir()
 	binDir := filepath.Join(home, "native", "bin")
 	agentBin := filepath.Join(binDir, "agent")
+	daemonExe := filepath.FromSlash("/ao/bin/ao")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -4188,7 +4271,7 @@ func TestSpawn_DoesNotAddNodeRuntimeForNativeBinary(t *testing.T) {
 			}
 			return agentBin, nil
 		},
-		Executable: func() (string, error) { return "/ao/bin/ao", nil },
+		Executable: func() (string, error) { return daemonExe, nil },
 	})
 	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker}); err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -4196,7 +4279,7 @@ func TestSpawn_DoesNotAddNodeRuntimeForNativeBinary(t *testing.T) {
 	if nodeLookups != 0 {
 		t.Fatalf("node LookPath calls = %d, want 0 for native binary", nodeLookups)
 	}
-	want := strings.Join([]string{binDir, "/ao/bin", "/usr/bin"}, string(os.PathListSeparator))
+	want := strings.Join([]string{binDir, filepath.Dir(daemonExe), "/usr/bin"}, string(os.PathListSeparator))
 	if got := rt.lastCfg.Env["PATH"]; got != want {
 		t.Fatalf("runtime env PATH = %q, want %q", got, want)
 	}

@@ -21,6 +21,75 @@ type ChangeLog struct {
 	CreatedAt time.Time
 }
 
+type ExecutionOperationJournal struct {
+	OperationID               string
+	ExternalRunID             string
+	RunID                     sql.NullString
+	Operation                 string
+	IdempotencyKey            string
+	RequestHash               []byte
+	RequestJson               string
+	ExpectedProcessGeneration sql.NullInt64
+	TargetProcessGeneration   int64
+	State                     string
+	AcceptedAt                time.Time
+	DispatchedAt              sql.NullTime
+	DispatchOwner             sql.NullString
+	DispatchFence             sql.NullString
+	CompletedAt               sql.NullTime
+	ResultRunID               sql.NullString
+	ResultProcessGeneration   sql.NullInt64
+	ResultJson                sql.NullString
+	ResultHash                []byte
+}
+
+type ExecutionRunBinding struct {
+	ExternalRunID        string
+	RunID                sql.NullString
+	State                string
+	ProcessGeneration    int64
+	LaunchOperationID    string
+	LaunchIdempotencyKey string
+	LaunchRequestHash    []byte
+	PendingOperationID   sql.NullString
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+}
+
+type IntegrationMergeJournal struct {
+	IdempotencyKey string
+	RequestHash    []byte
+	LeaseID        string
+	State          string
+	AcceptedAt     time.Time
+	DispatchedAt   sql.NullTime
+	DispatchOwner  sql.NullString
+	DispatchFence  sql.NullString
+	CompletedAt    sql.NullTime
+	OutcomeJson    sql.NullString
+}
+
+type IntegrationMergeLease struct {
+	ID                     string
+	Repository             string
+	SourceRepository       string
+	PRNumber               int64
+	SourceBranch           string
+	ExpectedHeadSha        string
+	BaseRepository         string
+	BaseBranch             string
+	MergeStrategy          string
+	CheckPolicyJson        string
+	ReviewPolicyJson       string
+	ManualApprovalRequired bool
+	CapabilityDigest       []byte
+	Status                 string
+	CreatedAt              time.Time
+	ExpiresAt              time.Time
+	ConsumedAt             sql.NullTime
+	RevokedAt              sql.NullTime
+}
+
 type Notification struct {
 	ID        string
 	SessionID domain.SessionID
@@ -199,6 +268,9 @@ type Session struct {
 	RuntimeLaunchID    string
 	WorkspaceRepoPath  string
 	TerminateOnPRMerge bool
+	AgentConfigSet     bool
+	AgentModel         string
+	AgentPermissions   domain.PermissionMode
 }
 
 type SessionCleanupFact struct {

@@ -44,7 +44,8 @@ func TestLANManagerAuthGatesSharedHandler(t *testing.T) {
 }
 
 // TestLANManagerBlocksLoopbackOnlyControlRoutes proves the LAN listener never
-// serves /shutdown, /internal/*, /api/v1/mobile*, /api/v1/dev*, or
+// blocks /shutdown, /internal/*, /api/v1/mobile*, /api/v1/dev*, and the
+// managed /api/v1/execution* surface. It also blocks
 // /api/v1/browser* — even when the request carries a spoofed Host: 127.0.0.1
 // and valid LAN auth, since gating on Host alone (localControlRequest) is what
 // let a LAN client reach these routes.
@@ -67,6 +68,8 @@ func TestLANManagerBlocksLoopbackOnlyControlRoutes(t *testing.T) {
 		"/api/v1/mobile/status",
 		"/api/v1/dev/import-projects",
 		"/api/v1/browser/status",
+		"/api/v1/execution",
+		"/api/v1/execution/operations",
 		"/api/v1/sessions/ao-1/preview/server",
 	}
 	for _, path := range blocked {
@@ -112,4 +115,17 @@ func TestLANManagerStartStopIdempotent(t *testing.T) {
 		t.Fatal("still running after stop")
 	}
 	_ = m.Stop(ctx) // second stop is a no-op
+}
+
+func TestLANExecutionBlockUsesExactSegmentBoundary(t *testing.T) {
+	for _, path := range []string{"/api/v1/execution", "/api/v1/execution/operations", "/api/v1/execution/operations/abc"} {
+		if !isLANControlBlockedPath(path) {
+			t.Fatalf("%q should be blocked", path)
+		}
+	}
+	for _, path := range []string{"/api/v1/executioner", "/api/v1/executions", "/api/v1/execution-v2"} {
+		if isLANControlBlockedPath(path) {
+			t.Fatalf("%q should remain a distinct sibling", path)
+		}
+	}
 }

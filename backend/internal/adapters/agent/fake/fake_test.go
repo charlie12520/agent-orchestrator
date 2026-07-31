@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,7 @@ func TestManifestReportsFakeHarness(t *testing.T) {
 func TestGetLaunchCommandIsScriptedTimeline(t *testing.T) {
 	// Fixed speedup so the emitted sleep is deterministic in the assertions.
 	t.Setenv(SpeedupEnv, "4")
+	wantShell := installTestShell(t)
 	cmd, err := New().GetLaunchCommand(context.Background(), ports.LaunchConfig{
 		Prompt: "ignored by the fake",
 	})
@@ -47,7 +49,7 @@ func TestGetLaunchCommandIsScriptedTimeline(t *testing.T) {
 	}
 	// argv[0] must be the RESOLVED shell path (what Manager.Spawn validates), not
 	// a bare "sh" — see ResolveBinary / #2692 review.
-	if len(cmd) != 3 || cmd[1] != "-lc" || !strings.HasSuffix(cmd[0], "sh") || !strings.Contains(cmd[0], "/") {
+	if len(cmd) != 3 || cmd[1] != "-lc" || filepath.Clean(cmd[0]) != filepath.Clean(wantShell) {
 		t.Fatalf("launch command shape = %#v, want [<resolved sh path> -lc <script>]", cmd)
 	}
 
@@ -82,13 +84,29 @@ func TestGetLaunchCommandIsScriptedTimeline(t *testing.T) {
 }
 
 func TestResolveBinaryReturnsResolvedShellPath(t *testing.T) {
+	want := installTestShell(t)
 	got, err := New().ResolveBinary(context.Background())
 	if err != nil {
 		t.Fatalf("ResolveBinary: unexpected error: %v", err)
 	}
-	if !strings.HasSuffix(got, "sh") || !strings.Contains(got, "/") {
-		t.Fatalf("ResolveBinary = %q, want an absolute resolved sh path", got)
+	if filepath.Clean(got) != filepath.Clean(want) {
+		t.Fatalf("ResolveBinary = %q, want resolved shell %q", got, want)
 	}
+}
+
+func installTestShell(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	name := "sh"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, nil, 0o755); err != nil {
+		t.Fatalf("write test shell: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	return path
 }
 
 // When no runnable sh is on PATH (Windows / stripped PATH), the fake must report
@@ -107,6 +125,7 @@ func TestResolveBinaryErrorsWhenNoShell(t *testing.T) {
 
 func TestGetLaunchCommandDefaultsToBaseCadence(t *testing.T) {
 	t.Setenv(SpeedupEnv, "")
+	installTestShell(t)
 	cmd, err := New().GetLaunchCommand(context.Background(), ports.LaunchConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -285,8 +304,16 @@ func TestFullLifecycleSpawnToTermination(t *testing.T) {
 		t.Fatalf("timeline script failed: %v\n%s", err, out)
 	}
 	elapsed := time.Since(start)
-	if elapsed > 5*time.Second {
-		t.Fatalf("sped-up run took %v, want well under a second (speedup not applied?)", elapsed)
+	maxElapsed := 5 * time.Second
+	if runtime.GOOS == "windows" {
+		// Even with the phase sleeps collapsed to ~1ms, the six shimmed shell
+		// hook launches carry several seconds of fixed Git-for-Windows process
+		// startup overhead on some hosts. The speedup still applies; this budget
+		// just needs to tolerate the platform cost.
+		maxElapsed = 10 * time.Second
+	}
+	if elapsed > maxElapsed {
+		t.Fatalf("sped-up run took %v, want <= %v", elapsed, maxElapsed)
 	}
 
 	raw, err := os.ReadFile(hookLog) //nolint:gosec // path is under the test's own TempDir

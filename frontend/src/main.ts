@@ -40,10 +40,7 @@ import { type DaemonLaunchSpec, resolveDaemonLaunch } from "./shared/daemon-laun
 import { createListenPortScanner, defaultRunFilePath, parseRunFile } from "./shared/daemon-discovery";
 import type { DaemonStatus } from "./shared/daemon-status";
 import { attachAppShortcuts } from "./main/app-shortcuts";
-import {
-	KEYBOARD_SHORTCUTS_HELP_CHANNEL,
-	type KeybindingOverrides,
-} from "./shared/shortcuts";
+import { KEYBOARD_SHORTCUTS_HELP_CHANNEL, type KeybindingOverrides } from "./shared/shortcuts";
 import {
 	type DaemonProbe,
 	expectedDaemonPort,
@@ -59,10 +56,16 @@ import { createBrowserViewHost, type BrowserViewHost } from "./main/browser-view
 import { connectSupervisor, type SupervisorLinkHandle } from "./main/supervisor-link";
 import { connectBrowserRuntime, type BrowserRuntimeLinkHandle } from "./main/browser-runtime-link";
 import { keepDaemonAlive, shouldLinkOnAttach } from "./main/daemon-owner";
+import { preflightDaemonLaunch, type DaemonPreflightResult, type DaemonPreflightSpec } from "./main/daemon-preflight";
 import { readMigrationState, updateMigration, writeAppStateMarker, type MigrationState } from "./main/app-state";
 import { isAllowedAppExternalURL, openAllowedAppExternalURL } from "./main/external-open";
 import { buildWindowsAppMenuTemplate } from "./main/menu";
 import { scanImportFolder } from "./main/import-folder-scan";
+import {
+	authoritativeSpawnPid,
+	verifySpawnedDaemon,
+	type SpawnDaemonDiscovery,
+} from "./shared/daemon-spawn";
 
 // Globals injected at compile time by @electron-forge/plugin-vite.
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
@@ -377,6 +380,8 @@ const RUN_FILE_POLL_MS = 300;
 // clock reading and ours race within normal scheduling jitter.
 const RUN_FILE_FRESHNESS_SKEW_MS = 2_000;
 const DAEMON_PROBE_TIMEOUT_MS = 2_000;
+const DAEMON_PREFLIGHT_TIMEOUT_MS = 30_000;
+const DAEMON_PREFLIGHT_OUTPUT_LIMIT = 1 << 20;
 
 function runFilePath(): string | null {
 	if (process.env.AO_RUN_FILE) return process.env.AO_RUN_FILE;
@@ -537,6 +542,53 @@ async function readDaemonProbe(port: number, endpoint: "healthz" | "readyz"): Pr
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+async function runDaemonPreflight(spec: DaemonPreflightSpec): Promise<DaemonPreflightResult> {
+	return new Promise((resolve) => {
+		let stdout = "";
+		let stderr = "";
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const finish = (result: DaemonPreflightResult) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			resolve(result);
+		};
+		let candidate: ChildProcess;
+		try {
+			candidate = spawn(spec.command, spec.args, {
+				cwd: spec.cwd,
+				env: daemonEnv(),
+				shell: spec.shell,
+				windowsHide: true,
+				stdio: "pipe",
+			});
+		} catch (error) {
+			resolve({ exitCode: null, stdout, stderr, error: (error as Error).message });
+			return;
+		}
+		const append = (current: string, chunk: Buffer): string =>
+			(current + chunk.toString("utf8")).slice(0, DAEMON_PREFLIGHT_OUTPUT_LIMIT);
+		candidate.stdout?.on("data", (chunk: Buffer) => {
+			stdout = append(stdout, chunk);
+		});
+		candidate.stderr?.on("data", (chunk: Buffer) => {
+			stderr = append(stderr, chunk);
+		});
+		candidate.once("error", (error) => finish({ exitCode: null, stdout, stderr, error: error.message }));
+		candidate.once("close", (code) => finish({ exitCode: code, stdout, stderr }));
+		timer = setTimeout(() => {
+			candidate.kill();
+			finish({
+				exitCode: null,
+				stdout,
+				stderr,
+				error: `attestation probe timed out after ${DAEMON_PREFLIGHT_TIMEOUT_MS}ms`,
+			});
+		}, DAEMON_PREFLIGHT_TIMEOUT_MS);
+	});
 }
 
 function daemonIdentityError(launch: DaemonLaunchSpec, probe: DaemonProbe): string | null {
@@ -732,9 +784,10 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	);
 	if (!launch) {
 		setDaemonStatus({
-			state: "stopped",
-			message: "AO_DAEMON_COMMAND is not configured; renderer uses loopback REST when available.",
-			code: "not_configured",
+			state: "error",
+			message:
+				'AO daemon configuration was rejected. Set AO_DAEMON_ARGV to ["/path/to/ao","daemon",...] with no wrapper or pre-subcommand arguments, or migrate AO_DAEMON_COMMAND to that direct shape.',
+			code: "spawn_failed",
 		});
 		return daemonStatus;
 	}
@@ -862,6 +915,21 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 		return daemonStatus;
 	}
 
+	const preflightError = await preflightDaemonLaunch(launch, runDaemonPreflight, (manifestPath) =>
+		readFile(manifestPath, "utf8"),
+	);
+	if (startEpoch !== daemonStartEpoch) return daemonStatus;
+	if (preflightError) {
+		setDaemonStatus({
+			state: "error",
+			message: preflightError,
+			code: "compatibility_mismatch",
+			executablePath: launch.command,
+			workingDirectory: launch.cwd,
+		});
+		return daemonStatus;
+	}
+
 	daemonOutput = "";
 	setDaemonStatus({ state: "starting" });
 	if (launch.source === "bundled") {
@@ -885,10 +953,10 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	// on THIS process. Without this, a stale exit from an already-stopped daemon
 	// could null out a newer daemonProcess started in the meantime, orphaning it.
 	//
-	// `detached` makes the child its own process-group leader. Because shell:true
-	// runs the command through /bin/sh, a plain kill() would only signal the shell
-	// wrapper and orphan the real daemon (which keeps holding the port). Killing
-	// the whole group via killDaemon() reaches the daemon and any PTY children.
+	// `detached` makes the directly spawned executable its own process-group
+	// leader. Configured launches are resolved to executable+argv and use
+	// shell:false, so preflight and launch cannot diverge through a shell wrapper.
+	// Killing the whole group via killDaemon() also reaches any PTY children.
 	//
 	// AO_KEEP_DAEMON: the daemon must survive this app, so it cannot inherit
 	// Electron-owned stdout/stderr pipes — when Electron exits, the pipe read
@@ -955,49 +1023,81 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	// streams are scanned) and the running.json handshake — first one wins.
 	const spawnedAtMs = Date.now();
 	let portConfirmed = false;
+	let verificationInFlight = false;
 	let runFileTimer: ReturnType<typeof setInterval> | undefined;
 	let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+	let discoveryRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
 	const stopDiscovery = () => {
 		if (runFileTimer) clearInterval(runFileTimer);
 		runFileTimer = undefined;
 		if (fallbackTimer) clearTimeout(fallbackTimer);
 		fallbackTimer = undefined;
+		if (discoveryRetryTimer) clearTimeout(discoveryRetryTimer);
+		discoveryRetryTimer = undefined;
 	};
 
-	const reportBoundPort = (port: number) => {
-		if (portConfirmed || daemonProcess !== child || daemonStoppingProcess === child) return;
-		portConfirmed = true;
-		stopDiscovery();
-		setDaemonStatus({ state: "ready", port });
+	const verifyDiscoveredPort = (discovery: SpawnDaemonDiscovery) => {
+		if (portConfirmed || verificationInFlight || daemonProcess !== child || daemonStoppingProcess === child) return;
+		verificationInFlight = true;
+		let retry = false;
+		void verifySpawnedDaemon({
+			discovery,
+			isProcessAlive: processAlive,
+			probe: readDaemonProbe,
+			identityError: (probe) => daemonIdentityError(launch, probe),
+			expectedPid: authoritativeSpawnPid(launch.source, child.pid),
+		})
+			.then((status) => {
+				if (daemonProcess !== child || daemonStoppingProcess === child) return;
+				if (!status) {
+					retry = true;
+					return;
+				}
+				// A daemon can answer health before storage migration finishes. Keep
+				// polling until ready, but fail closed immediately on identity or
+				// compatibility drift.
+				if (status.state === "error" && status.code === "not_ready") {
+					retry = true;
+					return;
+				}
+				portConfirmed = true;
+				stopDiscovery();
+				setDaemonStatus(status);
+				if (status.state !== "ready") return;
 
-		// Establish the OS-native liveness link on the spawn path (we own this
-		// daemon). Holding the connection keeps the daemon alive; when Electron
-		// exits for any reason, the OS closes the fd and the daemon detects EOF,
-		// then self-stops after its ~5s grace period. The attach paths link only
-		// when the daemon is app-owned (see establishSupervisorLink +
-		// shouldLinkOnAttach); headless `ao start` daemons stay unlinked so they
-		// remain persistent across app quit.
-		//
-		// AO_KEEP_DAEMON opts out of the link entirely: the daemon is spawned but
-		// survives the window closing, stopping only on an explicit `ao stop`.
-		// Reuse the `keep` captured at spawn rather than re-reading process.env
-		// here: the flag is a property of this spawn, not a value that should be
-		// able to flip between spawn and port-confirmation. (The process.on("exit")
-		// orphan-cleanup below re-reads process.env because this `keep` is scoped
-		// to the spawn function — AO_KEEP_DAEMON is set once at startup and never
-		// mutated, so both reads agree.)
-		if (!keep) {
-			establishSupervisorLink();
-		}
+				// Establish the OS-native liveness link on the spawn path (we own this
+				// daemon). Holding the connection keeps the daemon alive; when Electron
+				// exits for any reason, the OS closes the fd and the daemon detects EOF,
+				// then self-stops after its ~5s grace period. The attach paths link only
+				// when the daemon is app-owned (see establishSupervisorLink +
+				// shouldLinkOnAttach); headless `ao start` daemons stay unlinked so they
+				// remain persistent across app quit.
+				//
+				// AO_KEEP_DAEMON opts out of the link entirely: the daemon is spawned but
+				// survives the window closing, stopping only on an explicit `ao stop`.
+				// Reuse the `keep` captured at spawn rather than re-reading process.env
+				// here: the flag is a property of this spawn, not a value that should be
+				// able to flip between spawn and port-confirmation. (The process.on("exit")
+				// orphan-cleanup below re-reads process.env because this `keep` is scoped
+				// to the spawn function — AO_KEEP_DAEMON is set once at startup and never
+				// mutated, so both reads agree.)
+				if (!keep) establishSupervisorLink();
+			})
+			.finally(() => {
+				verificationInFlight = false;
+				if (retry && !portConfirmed && daemonProcess === child && daemonStoppingProcess !== child) {
+					discoveryRetryTimer = setTimeout(() => verifyDiscoveredPort(discovery), RUN_FILE_POLL_MS);
+				}
+			});
 	};
 
 	// One scanner per stream: each keeps its own partial-line buffer.
 	// Skipped under AO_KEEP_DAEMON: stdio is redirected to a log file (no pipes
 	// to scan), so port discovery falls back to the running.json handshake below.
 	if (!keep) {
-		const scanStdout = createListenPortScanner(reportBoundPort);
-		const scanStderr = createListenPortScanner(reportBoundPort);
+		const scanStdout = createListenPortScanner((port) => verifyDiscoveredPort({ source: "listen", port }));
+		const scanStderr = createListenPortScanner((port) => verifyDiscoveredPort({ source: "listen", port }));
 
 		child.stdout?.on("data", (chunk: Buffer) => {
 			const text = chunk.toString("utf8");
@@ -1022,8 +1122,13 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 					const info = parseRunFile(contents);
 					// Ignore a stale handshake left by a previous daemon: only trust a
 					// file written at/after this spawn.
-					if (info && info.startedAtMs >= spawnedAtMs - RUN_FILE_FRESHNESS_SKEW_MS) {
-						reportBoundPort(info.port);
+					if (info) {
+						verifyDiscoveredPort({
+							source: "runfile",
+							port: info.port,
+							contents,
+							notBeforeMs: spawnedAtMs - RUN_FILE_FRESHNESS_SKEW_MS,
+						});
 					}
 				})
 				.catch(() => undefined); // absent until the daemon binds; keep polling

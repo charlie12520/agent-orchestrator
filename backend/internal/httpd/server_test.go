@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
@@ -82,6 +83,27 @@ func TestHealthProbesIncludeDaemonIdentity(t *testing.T) {
 	}
 }
 
+func TestHealthProbesIncludeCompatibilityAttestation(t *testing.T) {
+	router := newTestRouter(config.Config{}, discardLogger(), nil)
+	for _, path := range []string{"/healthz", "/readyz"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		var body struct {
+			Attestation daemonmeta.Attestation `json:"attestation"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		if body.Attestation.Upstream.Commit != daemonmeta.UpstreamCommit ||
+			body.Attestation.Protocols.RESTAPI != daemonmeta.RESTAPIVersion ||
+			body.Attestation.Protocols.SSEEnvelope != daemonmeta.SSEEnvelopeVersion ||
+			!body.Attestation.Capabilities["healthAttestation"] {
+			t.Fatalf("GET %s attestation = %+v", path, body.Attestation)
+		}
+	}
+}
+
 // TestServerLifecycle exercises the full Run loop: bind an ephemeral port,
 // publish running.json, serve a request, then cancel the context and confirm a
 // clean shutdown that removes the handshake file.
@@ -118,6 +140,10 @@ func TestServerLifecycle(t *testing.T) {
 	}
 	if info.Port == 0 {
 		t.Error("run-file recorded port 0; want the actual bound port")
+	}
+	if info.Attestation == nil || info.Attestation.Upstream.Commit != daemonmeta.UpstreamCommit ||
+		!info.Attestation.Capabilities["runfileAttestation"] {
+		t.Fatalf("run-file attestation = %+v", info.Attestation)
 	}
 
 	cancel()

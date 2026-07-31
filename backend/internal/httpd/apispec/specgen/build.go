@@ -79,6 +79,10 @@ func Build() ([]byte, error) {
 			"Connect Mobile LAN bridge control (loopback/desktop only)"),
 		*(&openapi31.Tag{Name: "browser"}).WithDescription(
 			"Target-isolated desktop browser runtime (loopback only)"),
+		*(&openapi31.Tag{Name: "integration"}).WithDescription(
+			"Root-authenticated deterministic integration leases and brokered merges"),
+		*(&openapi31.Tag{Name: "execution"}).WithDescription(
+			"Managed primary-loopback execution mutation and sanitized journal reads"),
 	}
 
 	for _, op := range operations() {
@@ -93,10 +97,14 @@ func Build() ([]byte, error) {
 			oc.AddReqStructure(param)
 		}
 		if op.reqBody != nil {
-			// AddReqStructure leaves requestBody.required absent, which
-			// OpenAPI reads as optional. These bodies are mandatory, so force
-			// it — otherwise validators/generators treat the body as skippable.
-			oc.AddReqStructure(op.reqBody, openapi.WithCustomize(markRequestBodyRequired))
+			// AddReqStructure leaves requestBody.required absent. Preserve that
+			// only for operations whose body is intentionally optional; all
+			// other request bodies remain mandatory.
+			if op.reqBodyOptional {
+				oc.AddReqStructure(op.reqBody)
+			} else {
+				oc.AddReqStructure(op.reqBody, openapi.WithCustomize(markRequestBodyRequired))
+			}
 		}
 		for _, resp := range op.resps {
 			opts := []openapi.ContentOption{openapi.WithHTTPStatus(resp.status)}
@@ -134,14 +142,22 @@ var schemaNames = map[string]string{
 	// httpd/envelope
 	"EnvelopeAPIError": "APIError",
 	// domain
-	"DomainProjectID":           "ProjectID",
-	"DomainSessionID":           "SessionID",
-	"DomainIssueID":             "IssueID",
-	"DomainSession":             "Session",
-	"DomainProjectConfig":       "ProjectConfig",
-	"DomainTrackerIntakeConfig": "TrackerIntakeConfig",
-	"DomainAgentConfig":         "AgentConfig",
-	"DomainRoleOverride":        "RoleOverride",
+	"DomainProjectID":                 "ProjectID",
+	"DomainSessionID":                 "SessionID",
+	"DomainIssueID":                   "IssueID",
+	"DomainSession":                   "Session",
+	"DomainProjectConfig":             "ProjectConfig",
+	"DomainTrackerIntakeConfig":       "TrackerIntakeConfig",
+	"DomainAgentConfig":               "AgentConfig",
+	"DomainRoleOverride":              "RoleOverride",
+	"DomainIntegrationCheckPolicy":    "IntegrationCheckPolicy",
+	"DomainIntegrationReviewPolicy":   "IntegrationReviewPolicy",
+	"DomainIntegrationCheckEvidence":  "IntegrationCheckEvidence",
+	"DomainIntegrationReviewEvidence": "IntegrationReviewEvidence",
+	"DomainIntegrationMergeOutcome":   "IntegrationMergeOutcome",
+	"DomainExecutionOperation":        "ExecutionOperation",
+	"DomainExecutionJournalState":     "ExecutionJournalState",
+	"DomainExecutionRunBindingState":  "ExecutionRunBindingState",
 	// httpd/controllers (wire envelopes)
 	"ControllersListProjectsResponse":             "ListProjectsResponse",
 	"ControllersProjectResponse":                  "ProjectResponse",
@@ -166,7 +182,9 @@ var schemaNames = map[string]string{
 	"ControllersSetSessionMergePolicyResponse":    "SetSessionMergePolicyResponse",
 	"ControllersRenameSessionRequest":             "RenameSessionRequest",
 	"ControllersRenameSessionResponse":            "RenameSessionResponse",
+	"ControllersRestoreSessionRequest":            "RestoreSessionRequest",
 	"ControllersRestoreSessionResponse":           "RestoreSessionResponse",
+	"ControllersResumeAgentRequest":               "ResumeAgentRequest",
 	"ControllersResumeAgentResponse":              "ResumeAgentResponse",
 	"ControllersCleanupSessionsResponse":          "CleanupSessionsResponse",
 	"ControllersCleanupSkippedSession":            "CleanupSkippedSession",
@@ -220,6 +238,22 @@ var schemaNames = map[string]string{
 	"ControllersMergePRResponse":         "MergePRResponse",
 	"ControllersResolveCommentsRequest":  "ResolveCommentsRequest",
 	"ControllersResolveCommentsResponse": "ResolveCommentsResponse",
+	// httpd/controllers - hardened integration merge wire envelopes
+	"ControllersIssueIntegrationMergeLeaseRequest":   "IssueIntegrationMergeLeaseRequest",
+	"ControllersIssueIntegrationMergeLeaseResponse":  "IssueIntegrationMergeLeaseResponse",
+	"ControllersIntegrationMergeLeaseIDParam":        "IntegrationMergeLeaseIDParam",
+	"ControllersRevokeIntegrationMergeLeaseResponse": "RevokeIntegrationMergeLeaseResponse",
+	"ControllersConsumeIntegrationMergeRequest":      "ConsumeIntegrationMergeRequest",
+	"ControllersConsumeIntegrationMergeResponse":     "ConsumeIntegrationMergeResponse",
+	// httpd/controllers - managed execution wire envelopes
+	"ControllersExecuteOperationRequest":     "ExecuteOperationRequest",
+	"ControllersExecutionIdempotencyHeader":  "ExecutionIdempotencyHeader",
+	"ControllersExecutionManagedHeaders":     "ExecutionManagedHeaders",
+	"ControllersExecutionOperationIDParam":   "ExecutionOperationIDParam",
+	"ControllersExecutionExternalRunIDParam": "ExecutionExternalRunIDParam",
+	"ControllersExecuteOperationResponse":    "ExecuteOperationResponse",
+	"ControllersExecutionOperationResponse":  "ExecutionOperationResponse",
+	"ControllersExecutionBindingResponse":    "ExecutionBindingResponse",
 	// httpd/controllers — review wire envelopes
 	"ControllersListReviewsResponse":   "ListReviewsResponse",
 	"ControllersReviewRunResponse":     "ReviewRunResponse",
@@ -328,6 +362,7 @@ type operation struct {
 	tag                       string
 	pathParams                []any // path/query param containers (e.g. ProjectIDParam)
 	reqBody                   any   // JSON request body struct, nil when the op takes none
+	reqBodyOptional           bool  // request body may be omitted entirely
 	resps                     []respUnit
 	contentTypes              map[int]string // optional non-JSON response content types by status
 }
@@ -346,7 +381,106 @@ func operations() []operation {
 	ops = append(ops, mobileOperations()...)
 	ops = append(ops, browserOperations()...)
 	ops = append(ops, shellTerminalOperations()...)
+	ops = append(ops, integrationMergeOperations()...)
+	ops = append(ops, executionOperations()...)
 	return ops
+}
+
+func executionOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/execution/operations", id: "executeOperation", tag: "execution",
+			summary:    "Accept or exactly replay one managed execution mutation",
+			pathParams: []any{controllers.ExecutionManagedHeaders{}, controllers.ExecutionIdempotencyHeader{}},
+			reqBody:    controllers.ExecuteOperationRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ExecuteOperationResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusRequestEntityTooLarge, envelope.APIError{}},
+				{http.StatusUnsupportedMediaType, envelope.APIError{}},
+				{http.StatusServiceUnavailable, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/execution/operations/{operationId}", id: "getExecutionOperation", tag: "execution",
+			summary:    "Read one sanitized durable execution operation",
+			pathParams: []any{controllers.ExecutionManagedHeaders{}, controllers.ExecutionOperationIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ExecutionOperationResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusServiceUnavailable, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/execution/bindings/{externalRunId}", id: "getExecutionBinding", tag: "execution",
+			summary:    "Read one sanitized durable execution run binding",
+			pathParams: []any{controllers.ExecutionManagedHeaders{}, controllers.ExecutionExternalRunIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ExecutionBindingResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusUnauthorized, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusServiceUnavailable, envelope.APIError{}},
+			},
+		},
+	}
+}
+
+func integrationMergeOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodPost, path: "/api/v1/integration/merge-leases", id: "issueIntegrationMergeLease", tag: "integration",
+			summary: "Issue one bounded, root-authenticated integration lease",
+			reqBody: controllers.IssueIntegrationMergeLeaseRequest{},
+			resps: []respUnit{
+				{http.StatusCreated, controllers.IssueIntegrationMergeLeaseResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/integration/merge-leases/{leaseId}/revoke", id: "revokeIntegrationMergeLease", tag: "integration",
+			summary:    "Revoke an active integration lease exactly once",
+			pathParams: []any{controllers.IntegrationMergeLeaseIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.RevokeIntegrationMergeLeaseResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusGone, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/integration/merges", id: "consumeIntegrationMerge", tag: "integration",
+			summary: "Consume a lease and SHA-bound merge through the configured broker",
+			reqBody: controllers.ConsumeIntegrationMergeRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ConsumeIntegrationMergeResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusGone, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusServiceUnavailable, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
 }
 
 func browserOperations() []operation {
@@ -1002,9 +1136,22 @@ func sessionOperations() []operation {
 			},
 		},
 		{
-			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/restore", id: "restoreSession", tag: "sessions",
-			summary:    "Restore a terminated session",
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/cleanup", id: "cleanupSession", tag: "sessions",
+			summary:    "Clean up one terminated session workspace",
 			pathParams: []any{controllers.SessionIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.CleanupSessionsResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/restore", id: "restoreSession", tag: "sessions",
+			summary:         "Restore a terminated session",
+			pathParams:      []any{controllers.SessionIDParam{}},
+			reqBody:         controllers.RestoreSessionRequest{},
+			reqBodyOptional: true,
 			resps: []respUnit{
 				{http.StatusOK, controllers.RestoreSessionResponse{}},
 				{http.StatusNotFound, envelope.APIError{}},
@@ -1014,8 +1161,10 @@ func sessionOperations() []operation {
 		},
 		{
 			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/resume-agent", id: "resumeAgent", tag: "sessions",
-			summary:    "Resume an exited agent in its existing session",
-			pathParams: []any{controllers.SessionIDParam{}},
+			summary:         "Resume an exited agent in its existing session",
+			pathParams:      []any{controllers.SessionIDParam{}},
+			reqBody:         controllers.ResumeAgentRequest{},
+			reqBodyOptional: true,
 			resps: []respUnit{
 				{http.StatusOK, controllers.ResumeAgentResponse{}},
 				{http.StatusNotFound, envelope.APIError{}},
@@ -1065,12 +1214,13 @@ func sessionOperations() []operation {
 		{
 			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/activity", id: "setSessionActivity", tag: "sessions",
 			summary:    "Report an agent activity-state signal for a session",
-			pathParams: []any{controllers.SessionIDParam{}},
+			pathParams: []any{controllers.SessionIDParam{}, controllers.BrowserCapabilityHeader{}, controllers.RuntimeLaunchHeader{}},
 			reqBody:    controllers.SetActivityRequest{},
 			resps: []respUnit{
 				{http.StatusOK, controllers.SetActivityResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
@@ -1129,7 +1279,7 @@ func prOperations() []operation {
 	return []operation{
 		{
 			method: http.MethodPost, path: "/api/v1/prs/{id}/merge", id: "mergePR", tag: "prs",
-			summary:    "Squash-merge a pull request",
+			summary:    "Legacy PR merge placeholder (not the integration gate)",
 			pathParams: []any{controllers.PRIDParam{}},
 			resps: []respUnit{
 				{http.StatusOK, controllers.MergePRResponse{}},

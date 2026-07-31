@@ -68,6 +68,13 @@ func (c *commandContext) postJSON(ctx context.Context, path string, body, out an
 	return c.doJSON(ctx, http.MethodPost, path, body, out)
 }
 
+// postJSONWithHeaders is the scoped-credential variant used by worker-owned
+// callbacks. It deliberately does not teach every CLI command about worker
+// credentials: only callers that opt in can send the extra headers.
+func (c *commandContext) postJSONWithHeaders(ctx context.Context, path string, body, out any, headers map[string]string) error {
+	return c.doJSONPathWithHeaders(ctx, http.MethodPost, "/api/v1/"+path, body, out, headers)
+}
+
 // patchJSON sends body as JSON to PATCH /api/v1/<path> on the running daemon
 // and decodes a 2xx response into out.
 func (c *commandContext) patchJSON(ctx context.Context, path string, body, out any) error {

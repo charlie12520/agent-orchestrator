@@ -235,6 +235,9 @@ func TestNotificationsAPI_StreamCreatedNotifications(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Fatalf("content-type = %q", ct)
 	}
+	if got := resp.Header.Get("X-AO-SSE-Envelope-Version"); got != "1" {
+		t.Fatalf("X-AO-SSE-Envelope-Version = %q, want 1", got)
+	}
 	if stream.gotProject != "mer" {
 		t.Fatalf("project filter = %q", stream.gotProject)
 	}

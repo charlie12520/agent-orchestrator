@@ -301,6 +301,235 @@ paths:
       summary: Stream CDC events with durable replay
       tags:
       - events
+  /api/v1/execution/bindings/{externalRunId}:
+    get:
+      operationId: getExecutionBinding
+      parameters:
+      - description: Exact managed-daemon bearer credential.
+        in: header
+        name: Authorization
+        required: true
+        schema:
+          description: Exact managed-daemon bearer credential.
+          pattern: ^Bearer [0-9a-f]{64}$
+          type: string
+      - description: Exact current managed-daemon generation.
+        in: header
+        name: X-AO-Daemon-Generation
+        required: true
+        schema:
+          description: Exact current managed-daemon generation.
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+      - in: path
+        name: externalRunId
+        required: true
+        schema:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionBindingResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Read one sanitized durable execution run binding
+      tags:
+      - execution
+  /api/v1/execution/operations:
+    post:
+      operationId: executeOperation
+      parameters:
+      - description: Exact managed-daemon bearer credential.
+        in: header
+        name: Authorization
+        required: true
+        schema:
+          description: Exact managed-daemon bearer credential.
+          pattern: ^Bearer [0-9a-f]{64}$
+          type: string
+      - description: Exact current managed-daemon generation.
+        in: header
+        name: X-AO-Daemon-Generation
+        required: true
+        schema:
+          description: Exact current managed-daemon generation.
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+      - description: Must exactly equal the canonical request body's idempotencyKey.
+        in: header
+        name: Idempotency-Key
+        required: true
+        schema:
+          description: Must exactly equal the canonical request body's idempotencyKey.
+          maxLength: 128
+          minLength: 1
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecuteOperationRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecuteOperationResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Request Entity Too Large
+        "415":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unsupported Media Type
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Accept or exactly replay one managed execution mutation
+      tags:
+      - execution
+  /api/v1/execution/operations/{operationId}:
+    get:
+      operationId: getExecutionOperation
+      parameters:
+      - description: Exact managed-daemon bearer credential.
+        in: header
+        name: Authorization
+        required: true
+        schema:
+          description: Exact managed-daemon bearer credential.
+          pattern: ^Bearer [0-9a-f]{64}$
+          type: string
+      - description: Exact current managed-daemon generation.
+        in: header
+        name: X-AO-Daemon-Generation
+        required: true
+        schema:
+          description: Exact current managed-daemon generation.
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+      - in: path
+        name: operationId
+        required: true
+        schema:
+          maxLength: 64
+          minLength: 64
+          pattern: ^[0-9a-f]{64}$
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionOperationResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unauthorized
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Read one sanitized durable execution operation
+      tags:
+      - execution
   /api/v1/import:
     get:
       operationId: getImportStatus
@@ -350,6 +579,191 @@ paths:
       summary: Run the legacy AO project import through the daemon store
       tags:
       - import
+  /api/v1/integration/merge-leases:
+    post:
+      operationId: issueIntegrationMergeLease
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueIntegrationMergeLeaseRequest'
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssueIntegrationMergeLeaseResponse'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Issue one bounded, root-authenticated integration lease
+      tags:
+      - integration
+  /api/v1/integration/merge-leases/{leaseId}/revoke:
+    post:
+      operationId: revokeIntegrationMergeLease
+      parameters:
+      - description: Opaque SuperOrch-issued integration lease id.
+        in: path
+        name: leaseId
+        required: true
+        schema:
+          description: Opaque SuperOrch-issued integration lease id.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokeIntegrationMergeLeaseResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "410":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Gone
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Revoke an active integration lease exactly once
+      tags:
+      - integration
+  /api/v1/integration/merges:
+    post:
+      operationId: consumeIntegrationMerge
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConsumeIntegrationMergeRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsumeIntegrationMergeResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "410":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Gone
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Service Unavailable
+      summary: Consume a lease and SHA-bound merge through the configured broker
+      tags:
+      - integration
   /api/v1/mobile/disable:
     post:
       operationId: disableMobile
@@ -1054,7 +1468,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
-      summary: Squash-merge a pull request
+      summary: Legacy PR merge placeholder (not the integration gate)
       tags:
       - prs
   /api/v1/prs/{id}/resolve-comments:
@@ -1354,6 +1768,19 @@ paths:
         schema:
           description: Session identifier, e.g. project-1.
           type: string
+      - description: Opaque browser capability injected into the owning AO worker.
+        in: header
+        name: X-AO-Browser-Capability
+        schema:
+          description: Opaque browser capability injected into the owning AO worker.
+          type: string
+      - description: Current supervised AO worker process generation.
+        in: header
+        name: X-AO-Runtime-Launch-ID
+        schema:
+          description: Current supervised AO worker process generation.
+          pattern: ^[A-Za-z0-9_-]+$
+          type: string
       requestBody:
         content:
           application/json:
@@ -1379,6 +1806,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
         "500":
           content:
             application/json:
@@ -1392,6 +1825,45 @@ paths:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
       summary: Report an agent activity-state signal for a session
+      tags:
+      - sessions
+  /api/v1/sessions/{sessionId}/cleanup:
+    post:
+      operationId: cleanupSession
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CleanupSessionsResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Clean up one terminated session workspace
       tags:
       - sessions
   /api/v1/sessions/{sessionId}/kill:
@@ -1963,6 +2435,11 @@ paths:
         schema:
           description: Session identifier, e.g. project-1.
           type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreSessionRequest'
       responses:
         "200":
           content:
@@ -2002,6 +2479,11 @@ paths:
         schema:
           description: Session identifier, e.g. project-1.
           type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResumeAgentRequest'
       responses:
         "200":
           content:
@@ -2769,10 +3251,39 @@ components:
       - ok
       - sessionId
       type: object
+    ConsumeIntegrationMergeRequest:
+      properties:
+        gateCapability:
+          maxLength: 128
+          type: string
+        idempotencyKey:
+          maxLength: 128
+          minLength: 8
+          type: string
+        integrationLease:
+          maxLength: 64
+          type: string
+        manualApproval:
+          type: boolean
+      required:
+      - integrationLease
+      - gateCapability
+      - idempotencyKey
+      - manualApproval
+      type: object
+    ConsumeIntegrationMergeResponse:
+      properties:
+        outcome:
+          $ref: '#/components/schemas/IntegrationMergeOutcome'
+      required:
+      - outcome
+      type: object
     ControllersSessionView:
       properties:
         activity:
           $ref: '#/components/schemas/DomainActivity'
+        agentConfig:
+          $ref: '#/components/schemas/AgentConfig'
         branch:
           type: string
         createdAt:
@@ -2796,6 +3307,8 @@ components:
         previewUrl:
           type: string
         projectId:
+          type: string
+        prompt:
           type: string
         prs:
           items:
@@ -2835,6 +3348,8 @@ components:
           type: boolean
         updatedAt:
           format: date-time
+          type: string
+        workspacePath:
           type: string
       required:
       - id
@@ -2959,6 +3474,223 @@ components:
       required:
       - harness
       type: object
+    ExecuteOperationRequest:
+      additionalProperties: false
+      properties:
+        expectedProcessGeneration:
+          format: int64
+          maximum: 9.007199254740991e+15
+          minimum: 1
+          type: integer
+        externalRunId:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        idempotencyKey:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        operation:
+          enum:
+          - launch
+          - send
+          - interrupt
+          - resume
+          - restore
+          - stop
+          - cleanup
+          type: string
+        request:
+          additionalProperties: {}
+          type: object
+        runId:
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        version:
+          enum:
+          - 1
+          type: integer
+      required:
+      - version
+      - externalRunId
+      - operation
+      - idempotencyKey
+      - request
+      type: object
+    ExecuteOperationResponse:
+      properties:
+        externalRunId:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        operation:
+          enum:
+          - launch
+          - send
+          - interrupt
+          - resume
+          - restore
+          - stop
+          - cleanup
+          type: string
+        operationId:
+          maxLength: 64
+          minLength: 64
+          pattern: ^[0-9a-f]{64}$
+          type: string
+        processGeneration:
+          format: int64
+          maximum: 9.007199254740991e+15
+          minimum: 1
+          type: integer
+        replayed:
+          type: boolean
+        runId:
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        state:
+          enum:
+          - accepted
+          - dispatched
+          - result
+          - ambiguous
+          type: string
+        version:
+          enum:
+          - 1
+          type: integer
+      required:
+      - version
+      - operationId
+      - externalRunId
+      - operation
+      - processGeneration
+      - state
+      - replayed
+      type: object
+    ExecutionBindingResponse:
+      properties:
+        createdAt:
+          format: date-time
+          type: string
+        externalRunId:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        pendingOperationId:
+          maxLength: 64
+          minLength: 64
+          pattern: ^[0-9a-f]{64}$
+          type: string
+        processGeneration:
+          format: int64
+          maximum: 9.007199254740991e+15
+          minimum: 0
+          type: integer
+        runId:
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        state:
+          enum:
+          - launching
+          - active
+          - stopped
+          - cleaned
+          - busy
+          - ambiguous
+          type: string
+        updatedAt:
+          format: date-time
+          type: string
+        version:
+          enum:
+          - 1
+          type: integer
+      required:
+      - version
+      - externalRunId
+      - state
+      - processGeneration
+      - createdAt
+      - updatedAt
+      type: object
+    ExecutionOperationResponse:
+      properties:
+        acceptedAt:
+          format: date-time
+          type: string
+        completedAt:
+          format: date-time
+          type: string
+        dispatchedAt:
+          format: date-time
+          type: string
+        expectedProcessGeneration:
+          format: int64
+          maximum: 9.007199254740991e+15
+          minimum: 1
+          type: integer
+        externalRunId:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        operation:
+          enum:
+          - launch
+          - send
+          - interrupt
+          - resume
+          - restore
+          - stop
+          - cleanup
+          type: string
+        operationId:
+          maxLength: 64
+          minLength: 64
+          pattern: ^[0-9a-f]{64}$
+          type: string
+        resultProcessGeneration:
+          format: int64
+          type: integer
+        resultRunId:
+          type: string
+        runId:
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+          type: string
+        state:
+          enum:
+          - accepted
+          - dispatched
+          - result
+          - ambiguous
+          type: string
+        targetProcessGeneration:
+          format: int64
+          maximum: 9.007199254740991e+15
+          minimum: 1
+          type: integer
+        version:
+          enum:
+          - 1
+          type: integer
+      required:
+      - version
+      - operationId
+      - externalRunId
+      - operation
+      - targetProcessGeneration
+      - state
+      - acceptedAt
+      type: object
     ImportReport:
       properties:
         dryRun:
@@ -3006,6 +3738,273 @@ components:
           type: string
       required:
       - path
+      type: object
+    IntegrationCheckEvidence:
+      properties:
+        completedAt:
+          format: date-time
+          type: string
+        headSha:
+          maxLength: 40
+          minLength: 40
+          type: string
+        name:
+          maxLength: 128
+          type: string
+        status:
+          enum:
+          - passing
+          - pending
+          - failing
+          type: string
+      required:
+      - name
+      - headSha
+      - status
+      type: object
+    IntegrationCheckPolicy:
+      properties:
+        requireAllObservedPassing:
+          type: boolean
+        requiredChecks:
+          items:
+            type: string
+          type: array
+        revision:
+          maxLength: 128
+          type: string
+      required:
+      - revision
+      - requiredChecks
+      - requireAllObservedPassing
+      type: object
+    IntegrationMergeOutcome:
+      properties:
+        acceptedAt:
+          format: date-time
+          type: string
+        baseBranch:
+          type: string
+        baseRepository:
+          type: string
+        checkPolicy:
+          $ref: '#/components/schemas/IntegrationCheckPolicy'
+        checks:
+          items:
+            $ref: '#/components/schemas/IntegrationCheckEvidence'
+          type: array
+        completedAt:
+          format: date-time
+          type: string
+        dispatchedAt:
+          format: date-time
+          type: string
+        expectedHeadSha:
+          type: string
+        idempotencyKey:
+          type: string
+        mergeCommitSha:
+          type: string
+        mergeStrategy:
+          type: string
+        prNumber:
+          type: integer
+        reason:
+          maxLength: 128
+          type: string
+        repository:
+          type: string
+        reviewPolicy:
+          $ref: '#/components/schemas/IntegrationReviewPolicy'
+        reviews:
+          items:
+            $ref: '#/components/schemas/IntegrationReviewEvidence'
+          type: array
+        sourceBranch:
+          type: string
+        sourceRepository:
+          type: string
+        status:
+          enum:
+          - merged
+          - revalidation_required
+          - ambiguous
+          type: string
+        unresolvedReviewThreads:
+          type: integer
+        version:
+          type: integer
+      required:
+      - version
+      - status
+      - idempotencyKey
+      - repository
+      - sourceRepository
+      - prNumber
+      - sourceBranch
+      - expectedHeadSha
+      - baseRepository
+      - baseBranch
+      - mergeStrategy
+      - checkPolicy
+      - checks
+      - reviewPolicy
+      - reviews
+      - unresolvedReviewThreads
+      - acceptedAt
+      - completedAt
+      type: object
+    IntegrationReviewEvidence:
+      properties:
+        decision:
+          enum:
+          - approved
+          - changes_requested
+          - commented
+          - dismissed
+          type: string
+        headSha:
+          maxLength: 40
+          minLength: 40
+          type: string
+        reviewer:
+          maxLength: 128
+          type: string
+        submittedAt:
+          format: date-time
+          type: string
+      required:
+      - reviewer
+      - headSha
+      - decision
+      - submittedAt
+      type: object
+    IntegrationReviewPolicy:
+      properties:
+        requireResolvedThreads:
+          type: boolean
+        requiredApprovals:
+          maximum: 100
+          minimum: 0
+          type: integer
+        requiredReviewers:
+          items:
+            type: string
+          type: array
+        revision:
+          maxLength: 128
+          type: string
+      required:
+      - revision
+      - requiredApprovals
+      - requiredReviewers
+      - requireResolvedThreads
+      type: object
+    IssueIntegrationMergeLeaseRequest:
+      properties:
+        baseBranch:
+          maxLength: 255
+          type: string
+        baseRepository:
+          maxLength: 256
+          type: string
+        checkPolicy:
+          $ref: '#/components/schemas/IntegrationCheckPolicy'
+        expectedHeadSha:
+          maxLength: 40
+          minLength: 40
+          type: string
+        expiresAt:
+          format: date-time
+          type: string
+        manualApprovalRequired:
+          type: boolean
+        mergeStrategy:
+          enum:
+          - squash
+          - merge
+          - rebase
+          type: string
+        prNumber:
+          maximum: 1e+09
+          minimum: 1
+          type: integer
+        repository:
+          maxLength: 256
+          type: string
+        reviewPolicy:
+          $ref: '#/components/schemas/IntegrationReviewPolicy'
+        sourceBranch:
+          maxLength: 255
+          type: string
+        sourceRepository:
+          maxLength: 256
+          type: string
+      required:
+      - repository
+      - sourceRepository
+      - prNumber
+      - sourceBranch
+      - expectedHeadSha
+      - baseRepository
+      - baseBranch
+      - checkPolicy
+      - reviewPolicy
+      - manualApprovalRequired
+      type: object
+    IssueIntegrationMergeLeaseResponse:
+      properties:
+        baseBranch:
+          type: string
+        baseRepository:
+          type: string
+        checkPolicy:
+          $ref: '#/components/schemas/IntegrationCheckPolicy'
+        expectedHeadSha:
+          type: string
+        expiresAt:
+          format: date-time
+          type: string
+        gateCapability:
+          type: string
+        integrationLease:
+          type: string
+        issuedAt:
+          format: date-time
+          type: string
+        manualApprovalRequired:
+          type: boolean
+        mergeStrategy:
+          type: string
+        prNumber:
+          type: integer
+        repository:
+          type: string
+        reviewPolicy:
+          $ref: '#/components/schemas/IntegrationReviewPolicy'
+        sourceBranch:
+          type: string
+        sourceRepository:
+          type: string
+        version:
+          type: integer
+      required:
+      - version
+      - integrationLease
+      - gateCapability
+      - repository
+      - sourceRepository
+      - prNumber
+      - sourceBranch
+      - expectedHeadSha
+      - baseRepository
+      - baseBranch
+      - mergeStrategy
+      - checkPolicy
+      - reviewPolicy
+      - manualApprovalRequired
+      - issuedAt
+      - expiresAt
       type: object
     KillSessionResponse:
       properties:
@@ -3556,6 +4555,12 @@ components:
       - ok
       - resolved
       type: object
+    RestoreSessionRequest:
+      properties:
+        message:
+          maxLength: 4096
+          type: string
+      type: object
     RestoreSessionResponse:
       properties:
         ok:
@@ -3575,6 +4580,12 @@ components:
       - sessionId
       - restoreMode
       - session
+      type: object
+    ResumeAgentRequest:
+      properties:
+        message:
+          maxLength: 4096
+          type: string
       type: object
     ResumeAgentResponse:
       properties:
@@ -3656,6 +4667,25 @@ components:
       - review
       - reviews
       - reviewerHandleId
+      type: object
+    RevokeIntegrationMergeLeaseResponse:
+      properties:
+        integrationLease:
+          type: string
+        revokedAt:
+          format: date-time
+          type: string
+        status:
+          enum:
+          - revoked
+          type: string
+        version:
+          type: integer
+      required:
+      - version
+      - integrationLease
+      - status
+      - revokedAt
       type: object
     RoleOverride:
       properties:
@@ -4122,6 +5152,8 @@ components:
       type: object
     SpawnSessionRequest:
       properties:
+        agentConfig:
+          $ref: '#/components/schemas/AgentConfig'
         attachments:
           items:
             $ref: '#/components/schemas/ControllersSpawnAttachmentInput'
@@ -4405,3 +5437,7 @@ tags:
   name: mobile
 - description: Target-isolated desktop browser runtime (loopback only)
   name: browser
+- description: Root-authenticated deterministic integration leases and brokered merges
+  name: integration
+- description: Managed primary-loopback execution mutation and sanitized journal reads
+  name: execution

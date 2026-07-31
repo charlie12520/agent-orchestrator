@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
@@ -123,6 +124,7 @@ func (c *NotificationsController) stream(w http.ResponseWriter, r *http.Request)
 	h.Set("Cache-Control", "no-cache")
 	h.Set("Connection", "keep-alive")
 	h.Set("X-Accel-Buffering", "no")
+	h.Set("X-AO-SSE-Envelope-Version", strconv.Itoa(daemonmeta.SSEEnvelopeVersion))
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 

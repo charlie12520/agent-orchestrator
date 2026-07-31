@@ -6,6 +6,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/managedcontrol"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
 )
 
@@ -13,5 +14,9 @@ import (
 // test-only convenience that used to be the exported NewRouter wrapper; keeping
 // it here leaves the package's exported surface to the production constructors.
 func newTestRouter(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager) chi.Router {
-	return NewRouterWithControl(cfg, log, termMgr, APIDeps{}, ControlDeps{})
+	return NewRouterWithControl(cfg, log, termMgr, nil, APIDeps{}, ControlDeps{})
+}
+
+func newManagedTestRouter(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager, managed *managedcontrol.Runtime, deps APIDeps, control ControlDeps) chi.Router {
+	return NewRouterWithControl(cfg, log, termMgr, managed, deps, control)
 }

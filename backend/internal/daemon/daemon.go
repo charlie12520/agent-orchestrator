@@ -6,7 +6,9 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,9 +21,11 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
+	"github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
+	"github.com/aoagents/agent-orchestrator/backend/internal/managedcontrol"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/notify"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -32,6 +36,7 @@ import (
 	agentsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/agent"
 	browsersvc "github.com/aoagents/agent-orchestrator/backend/internal/service/browser"
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
+	executionapisvc "github.com/aoagents/agent-orchestrator/backend/internal/service/executionapi"
 	importsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/importer"
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
@@ -40,9 +45,37 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
 )
 
+type RunOptions struct {
+	ManagedBootstrap io.Reader
+}
+
 // Run starts the daemon and blocks until it exits. SIGINT/SIGTERM drive
 // graceful shutdown through the HTTP server and background workers.
 func Run() error {
+	return RunWithOptions(RunOptions{})
+}
+
+// RunWithOptions starts the daemon with optional hidden supervisor-only control
+// bootstrap. Managed bootstrap is read before config loading or any durable
+// mutation so malformed supervisor launches fail closed.
+func RunWithOptions(opts RunOptions) error {
+	// A release with ambiguous identity must stop before config loading, storage
+	// migration, or any other durable mutation.
+	if err := daemonmeta.ValidateBuildIdentity(); err != nil {
+		return fmt.Errorf("validate build identity: %w", err)
+	}
+	var managedRuntime *managedcontrol.Runtime
+	if opts.ManagedBootstrap != nil {
+		runtime, err := managedcontrol.LoadProcessBootstrap(opts.ManagedBootstrap)
+		if closer, ok := opts.ManagedBootstrap.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if err != nil {
+			return fmt.Errorf("managed control bootstrap: %w", err)
+		}
+		managedRuntime = runtime
+		defer managedRuntime.Close()
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -195,17 +228,10 @@ func Run() error {
 		}
 	}()
 
-	// Connect Mobile: the bridge service needs the LAN listener, but the LAN
-	// listener needs the built router's handler, which only exists once srv is
-	// constructed — and srv's router mounts the mobile controller, which needs
-	// the bridge service. Break the cycle with late binding: build bs with LAN
-	// left nil, hand its controller into NewWithDeps, then once srv exists,
-	// build the LAN listener over srv.Handler() and assign it onto bs.LAN.
-	bs := &controllers.BridgeService{
-		ConfigPath:  mobilebridge.Path(cfg.DataDir),
-		DefaultPort: mobilebridge.DefaultPort,
-	}
-	mc := &controllers.MobileController{Bridge: bs}
+	// Connect Mobile normally uses late binding because its LAN listener shares
+	// the built router. Managed mode instead receives a controller with no bridge
+	// service, so it cannot construct, restore, or start a LAN listener.
+	mobile := newMobileWiring(cfg.DataDir, managedRuntime != nil)
 	browserService := browsersvc.New(sessionSvc, browserBroker, browserAuthority)
 
 	// Standalone shell terminals: user-opened shells with no agent session
@@ -243,7 +269,7 @@ func Run() error {
 		go dispatcher.Run(ctx)
 	}
 
-	srv, err := httpd.NewWithDeps(cfg, log, termMgr, httpd.APIDeps{
+	srv, err := httpd.NewWithDeps(cfg, log, termMgr, managedRuntime, httpd.APIDeps{
 		Projects:           projectSvc,
 		Agents:             agentSvc,
 		Sessions:           sessionSvc,
@@ -257,7 +283,7 @@ func Run() error {
 		Events:             cdcPipe.Broadcaster,
 		Activity:           lcStack.LCM,
 		Telemetry:          telemetrySink,
-		Mobile:             mc,
+		Mobile:             mobile.controller,
 		DevImport: devimportsvc.New(devimportsvc.Deps{
 			Store:         store,
 			TargetDataDir: cfg.DataDir,
@@ -268,6 +294,9 @@ func Run() error {
 		Browser:             browserService,
 		PreviewServer:       managedPreview,
 		SessionCapabilities: browserAuthority,
+		// A2 exposes sanitized journal reads. Mutation intentionally fails closed
+		// until the separately reviewed real execution dispatcher is accepted.
+		Execution: executionapisvc.New(store, nil),
 	})
 	if err != nil {
 		stop()
@@ -294,17 +323,11 @@ func Run() error {
 		}()
 	}
 
-	// Late-bind: the LAN listener shares the exact loopback router instance so
-	// the LAN surface and loopback surface never drift apart.
-	lan := httpd.NewMobileLAN(srv.Handler(), mobilebridge.DefaultPort, log)
-	bs.LAN = lan
-
-	// Restore Connect Mobile across a daemon restart: if the bridge was left
-	// enabled, re-arm the listener on its last port with the same password
-	// hash so an already-paired phone keeps working with no new password.
-	// Best-effort: never blocks boot.
-	if err := restoreMobileOnBoot(mobilebridge.Path(cfg.DataDir), lan); err != nil {
-		log.Warn("restore mobile bridge on boot failed", "err", err)
+	// Standalone AO late-binds and restores Connect Mobile. Managed mode returns
+	// nil before constructing LANManager, regardless of persisted mobile state.
+	lan, mobileRestoreErr := mobile.attach(srv.Handler(), log, httpd.NewMobileLAN)
+	if mobileRestoreErr != nil {
+		log.Warn("restore mobile bridge on boot failed", "err", mobileRestoreErr)
 	}
 
 	// Reconcile sessions on boot: adopt crash-surviving runtimes, capture and
@@ -318,22 +341,7 @@ func Run() error {
 		log.Error("reconcile agent processes on boot failed", "err", reconcileErr)
 	}
 
-	// ponytail: 5s tolerates a brief frontend restart; tune if dev hot-reload trips it.
-	const supervisorGrace = 5 * time.Second
-
-	if ln, addr, err := supervisor.Listen(cfg.RunFilePath); err != nil {
-		// Non-fatal: without the link the daemon still works (e.g. headless "ao start"),
-		// it just will not auto-stop when a frontend dies. Do not block startup on it.
-		log.Warn("supervisor: listener unavailable; frontend-death auto-stop disabled", "err", err)
-	} else {
-		log.Info("supervisor: listening", "addr", addr)
-		sup := supervisor.New(supervisorGrace, srv.RequestShutdown, log)
-		go func() {
-			if err := sup.Serve(ctx, ln); err != nil {
-				log.Warn("supervisor: serve stopped with error", "err", err)
-			}
-		}()
-	}
+	startFrontendDeathSupervisor(ctx, cfg.RunFilePath, managedRuntime != nil, srv.RequestShutdown, log, supervisor.Listen)
 
 	runErr := srv.Run(ctx)
 
@@ -351,15 +359,53 @@ func Run() error {
 	managedPreview.Close()
 	<-previewDone
 	lcStack.Stop()
-	lanStopCtx, lanCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer lanCancel()
-	if err := lan.Stop(lanStopCtx); err != nil {
-		log.Error("mobile LAN listener shutdown", "err", err)
+	if lan != nil {
+		lanStopCtx, lanCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer lanCancel()
+		if err := lan.Stop(lanStopCtx); err != nil {
+			log.Error("mobile LAN listener shutdown", "err", err)
+		}
 	}
 	if err := cdcPipe.Stop(); err != nil {
 		log.Error("cdc pipeline shutdown", "err", err)
 	}
 	return runErr
+}
+
+type frontendSupervisorListen func(runFilePath string) (net.Listener, string, error)
+
+// startFrontendDeathSupervisor belongs only to the standalone Electron-owned
+// daemon. In managed mode SuperOrch owns daemon lifetime; arming AO's desktop
+// watcher would let an unrelated/short-lived frontend peer shut down the
+// managed daemon underneath live workers.
+func startFrontendDeathSupervisor(
+	ctx context.Context,
+	runFilePath string,
+	managed bool,
+	requestShutdown func(),
+	log *slog.Logger,
+	listen frontendSupervisorListen,
+) {
+	if managed {
+		log.Info("supervisor: frontend-death auto-stop disabled in managed mode")
+		return
+	}
+	// ponytail: 5s tolerates a brief frontend restart; tune if dev hot-reload trips it.
+	const supervisorGrace = 5 * time.Second
+	ln, addr, err := listen(runFilePath)
+	if err != nil {
+		// Non-fatal: without the link the daemon still works (e.g. headless "ao start"),
+		// it just will not auto-stop when a frontend dies. Do not block startup on it.
+		log.Warn("supervisor: listener unavailable; frontend-death auto-stop disabled", "err", err)
+		return
+	}
+	log.Info("supervisor: listening", "addr", addr)
+	sup := supervisor.New(supervisorGrace, requestShutdown, log)
+	go func() {
+		if err := sup.Serve(ctx, ln); err != nil {
+			log.Warn("supervisor: serve stopped with error", "err", err)
+		}
+	}()
 }
 
 func seedScratchProjectOnBoot(ctx context.Context, cfg config.Config, projects *projectsvc.Service) error {

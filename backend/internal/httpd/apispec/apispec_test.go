@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
+	yaml "gopkg.in/yaml.v3"
 )
 
 // TestDefaultLoadsEmbeddedSpec is the smoke test for //go:embed wiring:
@@ -19,6 +20,64 @@ func TestDefaultLoadsEmbeddedSpec(t *testing.T) {
 	}
 	if got, _ := op["operationId"].(string); got != "listProjects" {
 		t.Errorf("operationId = %q, want listProjects", got)
+	}
+}
+
+// TestRelaunchRequestBodiesAreOptionalMessages locks the wire compatibility
+// contract: existing clients may omit the body, while managed callers can send
+// one atomic first message.
+func TestRelaunchRequestBodiesAreOptionalMessages(t *testing.T) {
+	var document struct {
+		Paths map[string]map[string]struct {
+			RequestBody struct {
+				Required bool `yaml:"required"`
+				Content  map[string]struct {
+					Schema struct {
+						Ref string `yaml:"$ref"`
+					} `yaml:"schema"`
+				} `yaml:"content"`
+			} `yaml:"requestBody"`
+		} `yaml:"paths"`
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]any `yaml:"properties"`
+				Required   []string       `yaml:"required"`
+			} `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(apispec.Default().YAML(), &document); err != nil {
+		t.Fatalf("parse embedded spec: %v", err)
+	}
+
+	for _, tc := range []struct {
+		path, schema string
+	}{
+		{path: "/api/v1/sessions/{sessionId}/restore", schema: "RestoreSessionRequest"},
+		{path: "/api/v1/sessions/{sessionId}/resume-agent", schema: "ResumeAgentRequest"},
+	} {
+		op, ok := document.Paths[tc.path]["post"]
+		if !ok {
+			t.Fatalf("POST %s missing", tc.path)
+		}
+		if op.RequestBody.Required {
+			t.Fatalf("POST %s request body is required; empty-body clients must remain compatible", tc.path)
+		}
+		wantRef := "#/components/schemas/" + tc.schema
+		if got := op.RequestBody.Content["application/json"].Schema.Ref; got != wantRef {
+			t.Fatalf("POST %s request schema = %q, want %q", tc.path, got, wantRef)
+		}
+		schema, ok := document.Components.Schemas[tc.schema]
+		if !ok {
+			t.Fatalf("schema %q missing", tc.schema)
+		}
+		if _, ok := schema.Properties["message"]; !ok {
+			t.Fatalf("schema %q missing optional message property", tc.schema)
+		}
+		for _, required := range schema.Required {
+			if required == "message" {
+				t.Fatalf("schema %q requires message", tc.schema)
+			}
+		}
 	}
 }
 
@@ -67,5 +126,69 @@ func TestServeYAML(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "openapi: 3.1.0") {
 		t.Errorf("body did not begin with an OpenAPI 3.1 doc")
+	}
+}
+
+func TestExecutionSpecRequiresManagedAndIdempotencyHeaders(t *testing.T) {
+	op := apispec.Default().Operation(http.MethodPost, "/api/v1/execution/operations")
+	if op == nil {
+		t.Fatal("execution operation missing from embedded spec")
+	}
+	params, ok := op["parameters"].([]any)
+	if !ok {
+		t.Fatalf("execution parameters = %#v", op["parameters"])
+	}
+	required := map[string]bool{
+		"Authorization":          false,
+		"X-AO-Daemon-Generation": false,
+		"Idempotency-Key":        false,
+	}
+	for _, raw := range params {
+		param, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := param["name"].(string)
+		if _, tracked := required[name]; tracked && param["required"] == true {
+			required[name] = true
+		}
+	}
+	for name, found := range required {
+		if !found {
+			t.Errorf("required execution header %q missing", name)
+		}
+	}
+}
+
+func TestExecutionSpecDoesNotExposeOpaqueResults(t *testing.T) {
+	var document struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]any `yaml:"properties"`
+			} `yaml:"schemas"`
+		} `yaml:"components"`
+	}
+	if err := yaml.Unmarshal(apispec.Default().YAML(), &document); err != nil {
+		t.Fatalf("parse embedded spec: %v", err)
+	}
+	for _, response := range []struct {
+		name           string
+		safeProperties []string
+	}{
+		{name: "ExecuteOperationResponse", safeProperties: []string{"runId", "processGeneration", "state"}},
+		{name: "ExecutionOperationResponse", safeProperties: []string{"resultRunId", "resultProcessGeneration", "targetProcessGeneration", "state"}},
+	} {
+		schema, found := document.Components.Schemas[response.name]
+		if !found {
+			t.Fatalf("schema %q missing", response.name)
+		}
+		for _, property := range response.safeProperties {
+			if _, found := schema.Properties[property]; !found {
+				t.Fatalf("schema %q missing safe metadata property %q", response.name, property)
+			}
+		}
+		if _, exposed := schema.Properties["result"]; exposed {
+			t.Fatalf("schema %q exposed opaque result property", response.name)
+		}
 	}
 }

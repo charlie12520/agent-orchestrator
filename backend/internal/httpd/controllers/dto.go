@@ -125,14 +125,17 @@ type WorkspaceFileQuery struct {
 	Path string `query:"path" description:"Session-worktree-relative file path."`
 }
 
-// SessionView is the session wire shape: the domain read model plus the
-// display-safe branch name and the session's attributed pull requests in the
-// curated SessionPRFacts shape. One session can own many PRs (e.g. a stack), so
-// prs is a list. The embedded domain.Session.Metadata and domain.Session.PRs
-// fields are json:"-"; these curated fields are what serialize.
+// SessionView is the authenticated session wire shape: the domain read model,
+// persisted launch fields needed for history/relaunch, and attributed pull
+// requests in the curated SessionPRFacts shape. One session can own many PRs
+// (e.g. a stack), so prs is a list. The embedded domain.Session.Metadata and
+// domain.Session.PRs fields are json:"-"; these curated fields serialize.
 type SessionView struct {
 	domain.Session
-	Branch string `json:"branch,omitempty"`
+	Branch        string              `json:"branch,omitempty"`
+	WorkspacePath string              `json:"workspacePath,omitempty"`
+	Prompt        string              `json:"prompt,omitempty"`
+	AgentConfig   *domain.AgentConfig `json:"agentConfig,omitempty"`
 	// PreviewURL is the browser preview target the desktop app opens for this
 	// session, set via POST /sessions/{sessionId}/preview. Empty (omitted) when
 	// no preview has been requested. Pulled from the json:"-" domain Metadata.
@@ -158,6 +161,9 @@ type SpawnSessionRequest struct {
 	Harness   domain.AgentHarness `json:"harness,omitempty" enum:"claude-code,codex,aider,opencode,grok,droid,amp,agy,crush,cursor,qwen,copilot,goose,auggie,continue,devin,cline,kimi,kiro,kilocode,vibe,pi,autohand,fake"`
 	Branch    string              `json:"branch,omitempty"`
 	Prompt    string              `json:"prompt,omitempty" maxLength:"4096"`
+	// AgentConfig optionally overrides model and permissions for this session.
+	// Empty fields inherit the project's role-resolved config.
+	AgentConfig *domain.AgentConfig `json:"agentConfig,omitempty"`
 	// DisplayName is the sidebar label for the session, capped at 20 characters.
 	// `ao spawn --name` always sets it; other clients (e.g. the desktop new-task
 	// dialog) may omit it and fall back to the session id in the read model.
@@ -275,6 +281,13 @@ type BrowserCapabilityHeader struct {
 	Capability string `header:"X-AO-Browser-Capability" description:"Opaque browser capability injected into the owning AO worker."`
 }
 
+// RuntimeLaunchHeader identifies the current supervised process generation.
+// Managed worker callbacks pair it with BrowserCapabilityHeader so a stale
+// process cannot report activity for a replacement generation.
+type RuntimeLaunchHeader struct {
+	LaunchID string `header:"X-AO-Runtime-Launch-ID" pattern:"^[A-Za-z0-9_-]+$" description:"Current supervised AO worker process generation."`
+}
+
 // BrowserStatusResponse reports whether the desktop-owned browser transport is
 // ready. A connected runtime can create the session target while its panel is
 // hidden; panel visibility is intentionally not part of this state.
@@ -322,12 +335,22 @@ type SetSessionMergePolicyResponse struct {
 	Session            SessionView      `json:"session"`
 }
 
+// RestoreSessionRequest is the optional body of POST /api/v1/sessions/{sessionId}/restore.
+type RestoreSessionRequest struct {
+	Message string `json:"message,omitempty" maxLength:"4096"`
+}
+
 // RestoreSessionResponse is the body of POST /api/v1/sessions/{sessionId}/restore.
 type RestoreSessionResponse struct {
 	OK          bool                       `json:"ok"`
 	SessionID   domain.SessionID           `json:"sessionId"`
 	RestoreMode sessionsvc.RestoreModeView `json:"restoreMode" enum:"native,saved_prompt,fresh"`
 	Session     SessionView                `json:"session"`
+}
+
+// ResumeAgentRequest is the optional body of POST /api/v1/sessions/{sessionId}/resume-agent.
+type ResumeAgentRequest struct {
+	Message string `json:"message,omitempty" maxLength:"4096"`
 }
 
 // ResumeAgentResponse is the body of POST /api/v1/sessions/{sessionId}/resume-agent.

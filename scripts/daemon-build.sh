@@ -90,9 +90,27 @@ command -v go >/dev/null
 goexe="$(go env GOEXE)"
 binary_name="ao${goexe}"
 binary_path="${build_dir}/${binary_name}"
+build_version="${AO_BUILD_VERSION:-$(cd "${repo_root}" && node -p "require('./frontend/package.json').version")}"
+build_mode="${AO_BUILD_MODE:-development}"
+fork_commit="$(AO_BUILD_MODE="${build_mode}" node "${repo_root}/frontend/scripts/build-provenance.mjs")"
+
+if [[ "${build_version}" =~ ^(dev|development|unknown)$ || ! "${build_version}" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+  printf 'AO_BUILD_VERSION must be explicit and linker-safe, got %s\n' "${build_version}" >&2
+  exit 1
+fi
+if [[ ! "${fork_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'AO_FORK_COMMIT must be a lowercase full 40-character SHA, got %s\n' "${fork_commit}" >&2
+  exit 1
+fi
+if [[ "${build_mode}" != "development" && "${build_mode}" != "release" ]]; then
+  printf 'AO_BUILD_MODE must be development or release, got %s\n' "${build_mode}" >&2
+  exit 1
+fi
+build_package="github.com/aoagents/agent-orchestrator/backend/internal/daemonmeta"
+ldflags="-X ${build_package}.BuildVersion=${build_version} -X ${build_package}.ForkCommit=${fork_commit} -X ${build_package}.BuildMode=${build_mode}"
 
 mkdir -p "${build_dir}"
-(cd "${backend_dir}" && go build -o "${binary_path}" ./cmd/ao)
+(cd "${backend_dir}" && go build -trimpath -buildvcs=false -ldflags "${ldflags}" -o "${binary_path}" ./cmd/ao)
 
 if ! install_dir="$(select_install_dir)"; then
   printf 'Could not find a writable directory on PATH for ao\n' >&2
