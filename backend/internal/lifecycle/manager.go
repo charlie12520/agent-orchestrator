@@ -666,5 +666,9 @@ func mergeMetadata(base, in domain.SessionMetadata) domain.SessionMetadata {
 	base.RuntimeLaunchID = in.RuntimeLaunchID
 	set(&base.AgentSessionID, in.AgentSessionID)
 	set(&base.Prompt, in.Prompt)
+	if in.AgentConfig != nil {
+		agentConfig := *in.AgentConfig
+		base.AgentConfig = &agentConfig
+	}
 	return base
 }
